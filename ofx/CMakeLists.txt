@@ -4,6 +4,12 @@ project(NimbusDiffusor CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# build a universal binary that works on both Intel and Apple Silicon
+if (APPLE)
+    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64")
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0")
+endif()
+
 # ---------------------------------------------------------------------------
 # Download the OpenFX headers only — do NOT build the OpenFX project itself
 # ---------------------------------------------------------------------------
