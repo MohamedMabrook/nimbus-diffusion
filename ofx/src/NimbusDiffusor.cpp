@@ -1,32 +1,13 @@
-// Nimbus Diffusion — OFX plugin for DaVinci Resolve Color page
+// Nimbus Diffusion
 // Copyright (C) 2026 Mohamed Mabrok
+// GPL v3 - see LICENSE
 //
-// Original work: OFX plugin architecture, Lens/Print two-stage design,
-// Anamorphic Stretch, and Chromatic Bloom features.
+// OFX diffusion plugin for DaVinci Resolve. Lens and Print stages,
+// anamorphic stretch, chromatic bloom.
 //
-// PSF algorithm based on spektrafilm (GPLv3) by Andrea Volpato.
-// https://github.com/AcademySoftwareFoundation/spektrafilm
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// ────────────────────────────────────────────────────────────────────────────
-// v2.2 — Two independent diffusion stages (Lens + Print).
-// Exact spektrafilm formula per stage:
-//   E_out = (1 - p_s) * E_in  +  p_s * (K_s * E_in)
-// Combined with a global Mix slider:
-//   final  = (1 - mix*(p_sL+p_sP)) * src  +  mix * (p_sL*K_L*src + p_sP*K_P*src)
-//
-// Exclusive features (Advanced):
-//   Anamorphic Stretch — horizontally-elongated PSF (oval bloom)
-//   Chromatic Bloom   — per-channel lambda on bloom (R wider, B tighter)
+// PSF math based on spektrafilm by Andrea Volpato (GPLv3).
+// I rewrote it in C++ with separable IIR blur instead of FFT,
+// added the two-stage setup and the extra controls.
 
 #include <cmath>
 #include <vector>
@@ -46,9 +27,6 @@
 #include "ofxPixels.h"
 #include "ofxMultiThread.h"
 
-// ============================================================================
-// OFX suite pointers
-// ============================================================================
 static OfxHost               *gHost        = nullptr;
 static OfxImageEffectSuiteV1 *gEffectSuite = nullptr;
 static OfxPropertySuiteV1    *gPropSuite   = nullptr;
@@ -56,30 +34,21 @@ static OfxParameterSuiteV1   *gParamSuite  = nullptr;
 static OfxMemorySuiteV1      *gMemorySuite = nullptr;
 
 static const char *kPluginId = "com.nimbusdiffusor.NimbusDiffusion";
-static const int   kMajorVer = 2;
-static const int   kMinorVer = 2;
+static const int kMajorVer = 2, kMinorVer = 2;
 
-// ============================================================================
-// Parameter IDs
-// ============================================================================
-// Global
+// param IDs
 #define kParamMix           "Mix"
-
-// Lens stage
 #define kParamLensActive    "LensActive"
 #define kParamLensFilter    "LensFilterType"
 #define kParamLensStrength  "LensStrength"
 #define kParamLensSize      "LensSize"
 #define kParamLensWarmth    "LensWarmth"
-
-// Print stage
 #define kParamPrintActive   "PrintActive"
 #define kParamPrintFilter   "PrintFilterType"
 #define kParamPrintStrength "PrintStrength"
 #define kParamPrintSize     "PrintSize"
 #define kParamPrintWarmth   "PrintWarmth"
-
-// Advanced
+// advanced
 #define kParamPixelSize      "SensorPixelUm"
 #define kParamStretch        "Stretch"
 #define kParamChroma         "ChromaShift"

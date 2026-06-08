@@ -1,35 +1,41 @@
 # Nimbus Diffusion
 
-**Free OFX optical diffusion plugin for DaVinci Resolve**
-by Mohamed Mabrok — released under GPL v3
+A free OFX diffusion plugin for DaVinci Resolve, by Mohamed Mabrok.
 
-Simulates the look of physical diffusion filters (Black Pro-Mist, Pro-Mist,
-Glimmerglass, CineBloom) directly on the DaVinci Resolve Color page.
+Makes your footage look like it was shot through a Black Pro-Mist, Pro-Mist, Glimmerglass or CineBloom filter. Works directly on the Color page.
 
----
+Based on the spektrafilm diffusion algorithm by Andrea Volpato. Released free under GPL v3.
 
-## Features
+## What's in it
 
-- **Lens stage** — capture-stage diffusion (lens filter on camera)
-- **Print stage** — output-stage diffusion (enlarger/print filter)
-- **Mix** — global wet/dry blend
-- **Anamorphic Stretch** — oval PSF for anamorphic lens looks *(original)*
-- **Chromatic Bloom** — R/B channel aberration on the bloom *(original)*
+Two separate diffusion stages you can use independently or stack:
 
-## Installation (Windows)
+- **Lens** - simulates a filter on the camera lens at capture
+- **Print** - simulates diffusion at the print/output stage
+- **Mix** - blend the whole effect up or down without touching anything else
+- Anamorphic Stretch and Chromatic Bloom in the Advanced section if you want to get weird with it
 
-1. Right-click `install.bat` → **Run as administrator**
-2. Restart DaVinci Resolve
-3. If controls look wrong: Preferences → System → Memory and GPU → Clear OFX cache
+## How to install
+
+Download the installer from the [releases page](https://github.com/MohamedMabrook/nimbus-diffusion/releases), run it as administrator, restart Resolve.
+
+If the sliders look off after installing, go to Preferences > System > Memory and GPU and clear the OFX cache, then restart again.
+
+## Building from source
+
+You need CMake, Visual Studio with C++ workload, and Git.
+
+```
+cd ofx
+install.bat
+```
+
+Run install.bat as administrator.
 
 ## Credits
 
-PSF algorithm based on [spektrafilm](https://github.com/AcademySoftwareFoundation/spektrafilm)
-by Andrea Volpato (GPLv3).
-
-OFX plugin, two-stage architecture, Anamorphic Stretch, and Chromatic Bloom
-by Mohamed Mabrok (GPLv3).
+The diffusion algorithm and PSF math come from spektrafilm by Andrea Volpato (GPLv3). The OFX plugin, two-stage design, anamorphic stretch and chromatic bloom are original.
 
 ## License
 
-GNU General Public License v3 — see [LICENSE](LICENSE)
+GPL v3. See LICENSE file.
