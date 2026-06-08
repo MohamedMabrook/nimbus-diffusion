@@ -1,0 +1,11 @@
+# Build output
+ofx/build/
+ofx/_deps/
+
+# Extracted/temp files
+logo_extracted_*.jpeg
+logo_extracted_*.png
+
+# Windows
+Thumbs.db
+Desktop.ini
