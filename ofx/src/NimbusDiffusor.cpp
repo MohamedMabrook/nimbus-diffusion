@@ -389,19 +389,19 @@ static OfxStatus action_describe(OfxImageEffectHandle handle) {
         0.0, -1.5,1.5, -1.5,1.5, GRP_)
 
 // 6 fine-tuning controls per stage (under Advanced)
-#define DEF_STAGE_ADV(CI_,CS_,HI_,HS_,BI_,BS_, GRP_)                            \
-    DEF_D(CI_,"Core Intensity","Core brightness multiplier.",                     \
-        1.0, 0.0,4.0, 0.0,4.0, GRP_)                                             \
-    DEF_D(CS_,"Core Size","Core radius multiplier.",                              \
-        1.0, 0.1,4.0, 0.1,4.0, GRP_)                                             \
-    DEF_D(HI_,"Halo Intensity","Halo brightness multiplier.",                     \
-        1.0, 0.0,4.0, 0.0,4.0, GRP_)                                             \
-    DEF_D(HS_,"Halo Size","Halo radius multiplier.",                              \
-        1.0, 0.1,4.0, 0.1,4.0, GRP_)                                             \
-    DEF_D(BI_,"Bloom Intensity","Bloom brightness multiplier.",                   \
-        1.0, 0.0,4.0, 0.0,4.0, GRP_)                                             \
-    DEF_D(BS_,"Bloom Size","Bloom radius multiplier.",                            \
-        1.0, 0.1,4.0, 0.1,4.0, GRP_)
+#define DEF_STAGE_ADV(CI_,CS_,HI_,HS_,BI_,BS_, CI_D,CS_D,HI_D,HS_D,BI_D,BS_D, GRP_) \
+    DEF_D(CI_,"Core Intensity","Core brightness multiplier.",                          \
+        CI_D, 0.0,4.0, 0.0,4.0, GRP_)                                                 \
+    DEF_D(CS_,"Core Size","Core radius multiplier.",                                   \
+        CS_D, 0.1,4.0, 0.1,4.0, GRP_)                                                 \
+    DEF_D(HI_,"Halo Intensity","Halo brightness multiplier.",                          \
+        HI_D, 0.0,4.0, 0.0,4.0, GRP_)                                                 \
+    DEF_D(HS_,"Halo Size","Halo radius multiplier.",                                   \
+        HS_D, 0.1,4.0, 0.1,4.0, GRP_)                                                 \
+    DEF_D(BI_,"Bloom Intensity","Bloom brightness multiplier.",                        \
+        BI_D, 0.0,4.0, 0.0,4.0, GRP_)                                                 \
+    DEF_D(BS_,"Bloom Size","Bloom radius multiplier.",                                 \
+        BS_D, 0.1,4.0, 0.1,4.0, GRP_)
 
 static OfxStatus action_describe_in_context(OfxImageEffectHandle handle,
                                              OfxPropertySetHandle /*inArgs*/)
@@ -455,7 +455,7 @@ static OfxStatus action_describe_in_context(OfxImageEffectHandle handle,
     DEF_D(kParamPixelSize,"Sensor Pixel um",
         "Physical pixel size in micrometers. 6.0 is typical for a cinema camera. "
         "Affects the absolute scale of the blur.",
-        6.0, 1.0,24.0, 1.0,24.0, "AdvGroup")
+        12.4, 1.0,24.0, 1.0,24.0, "AdvGroup")
 
     DEF_D(kParamStretch,"Anamorphic Stretch",
         "Stretch the glow horizontally. 1.0=round, 2.0=oval twice as wide as tall.",
@@ -469,12 +469,14 @@ static OfxStatus action_describe_in_context(OfxImageEffectHandle handle,
         kParamLensCore,  kParamLensCoreSize,
         kParamLensHalo,  kParamLensHaloSize,
         kParamLensBloom, kParamLensBloomSize,
+        1.0, 1.0, 1.426, 1.0, 1.0, 1.0,
         "AdvGroup")
 
     DEF_STAGE_ADV(
         kParamPrintCore,  kParamPrintCoreSize,
         kParamPrintHalo,  kParamPrintHaloSize,
         kParamPrintBloom, kParamPrintBloomSize,
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
         "AdvGroup")
 
     gParamSuite->paramDefine(paramSet,kOfxParamTypeGroup,"AdvGroupEnd",&pProps);
@@ -530,7 +532,7 @@ static OfxStatus action_get_roi(OfxImageEffectHandle handle,
         return std::max(0,std::min(kNumFamilies-1,v));
     };
 
-    double pixelUm = std::max(1.0, fd(kParamPixelSize,6.0));
+    double pixelUm = std::max(1.0, fd(kParamPixelSize,12.4));
     double stretch = std::max(0.5, fd(kParamStretch,  1.0));
     double chroma  = std::max(0.0, fd(kParamChroma,   0.0));
 
@@ -573,7 +575,7 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
     };
 
     double mix    = std::max(0.0,std::min(1.0, gd(kParamMix,      1.0)));
-    double pixelUm= std::max(1e-6,              gd(kParamPixelSize,6.0));
+    double pixelUm= std::max(1e-6,              gd(kParamPixelSize,12.4));
     double stretch= std::max(0.01,              gd(kParamStretch,  1.0));
     double chroma = std::max(0.0,               gd(kParamChroma,   0.0));
     double sq_str = std::sqrt(stretch);
