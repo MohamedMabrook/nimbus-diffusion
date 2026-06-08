@@ -65,9 +65,7 @@ static const int kMajorVer = 2, kMinorVer = 2;
 #define kParamPrintBloom     "PrintBloomIntensity"
 #define kParamPrintBloomSize "PrintBloomSize"
 
-// ============================================================================
-// Family presets  (matches spektrafilm _DIFFUSION_FILTER_SHAPES exactly)
-// ============================================================================
+// filter presets, from spektrafilm's characterization
 static const int MAX_SUB = 4;
 
 struct GroupCfg { double lambda_um, spread; int n; double alpha; };
@@ -98,9 +96,7 @@ static const double kStrengthBreaks[5]    = {0.125,0.25,0.5,1.0,2.0};
 static const double kStrengthFractions[5] = {0.10, 0.20,0.35,0.55,0.75};
 static const double kWarmthAxis[3]        = {+1.30,+0.15,-1.45};
 
-// ============================================================================
-// Math helpers
-// ============================================================================
+// simple piecewise linear interpolation
 static double interp_lin(double x, const double *xs, const double *ys, int n) {
     if (x<=xs[0]) return ys[0]; if (x>=xs[n-1]) return ys[n-1];
     for (int i=0;i<n-1;++i)
@@ -109,6 +105,7 @@ static double interp_lin(double x, const double *xs, const double *ys, int n) {
     return ys[n-1];
 }
 
+// map user-facing strength (0.125..2.0 stops) to scattering fraction p_s
 static double strength_to_ps(double s, int fi) {
     if (s<=0) return 0;
     double lb[5]; for (int i=0;i<5;++i) lb[i]=std::log2(kStrengthBreaks[i]);
@@ -116,6 +113,7 @@ static double strength_to_ps(double s, int fi) {
     return std::max(0.0,std::min(0.99,base*kFamilies[fi].gain));
 }
 
+// spread a single PSF group into sub-components along a log scale
 static void expand_group(const GroupCfg &g, bool is_bloom,
                           double *lams, double *wts) {
     int n=g.n;
@@ -131,6 +129,7 @@ static void expand_group(const GroupCfg &g, bool is_bloom,
     } else { for (int k=0;k<n;++k) wts[k]=1.0/n; }
 }
 
+// per-channel halo weights — warmth shifts energy toward R or B sub-components
 static void halo_channel_weights(const double *wts, int n, double warmth,
                                   double out[3][MAX_SUB]) {
     warmth=std::max(-1.5,std::min(1.5,warmth));
@@ -146,9 +145,8 @@ static void halo_channel_weights(const double *wts, int n, double warmth,
     }
 }
 
-// ============================================================================
-// IIR bilateral exponential blur
-// ============================================================================
+// separable IIR exponential blur — forward+backward pass, energy-conserving
+// alpha = exp(-1/lambda), per-channel lambda so chromatic bloom can vary R/G/B
 using Buf = std::vector<float>;
 
 static void exp_blur_general(Buf &buf, int w, int h,
@@ -203,9 +201,6 @@ static void exp_blur_inplace(Buf &buf, int w, int h, double lam_h, double lam_v)
     exp_blur_general(buf,w,h,lh,lv);
 }
 
-// ============================================================================
-// Image I/O
-// ============================================================================
 static Buf read_image(void *data, int w, int h, int rowBytes, int nComp) {
     Buf buf((size_t)w*h*4,0.0f);
     for (int y=0;y<h;++y){
@@ -235,17 +230,11 @@ static void write_image(const Buf &buf, void *data, int w, int h,
     }
 }
 
-// ============================================================================
-// PSF accumulator — one diffusion stage
+// accumulate one diffusion stage into psf_acc
+// adds p_s * K_stage * src — p_s is baked in so you can just sum both stages
 //
-// Adds  p_s * K_stage * src  into psf_acc.
-// p_s is baked into the coefficients so the caller just sums contributions.
-// Returns p_s actually applied (0 if stage is off).
-//
-// Formula matches spektrafilm exactly:
-//   E_out = (1-p_s)*src + p_s*(K*src)
-//         = src + p_s*(K*src - src)
-// ============================================================================
+// same formula as spektrafilm:
+//   result = src + mix * (psf_acc - ps_total * src)
 static double accumulate_stage(
     const Buf &src, int W, int H,
     int fi, double p_s,
@@ -282,7 +271,7 @@ static double accumulate_stage(
 
     size_t np = (size_t)W*H;
 
-    // Core (achromatic)
+    // core — achromatic, same blur for all channels
     for (int k=0; k<cg.n; ++k) {
         if (cw[k]<=0) continue;
         double lam = cl[k]*size/pixelUm;
@@ -295,7 +284,7 @@ static double accumulate_stage(
         }
     }
 
-    // Halo (per-channel warmth)
+    // halo — per-channel weights for the warmth tint
     for (int k=0; k<hg.n; ++k) {
         double lam = hl[k]*size/pixelUm;
         exp_blur_inplace(tmp=src, W, H, lam*sq_str, lam/sq_str);
@@ -309,7 +298,7 @@ static double accumulate_stage(
         }
     }
 
-    // Bloom (chromatic aberration via per-channel lambda)
+    // bloom — chromatic aberration: R scatters wider, B tighter
     const double cs[4]={1.0+chroma, 1.0, std::max(0.1,1.0-chroma*0.5), 1.0};
     for (int k=0; k<bg.n; ++k) {
         if (bw[k]<=0) continue;
@@ -336,9 +325,6 @@ static double accumulate_stage(
     return p_s;
 }
 
-// ============================================================================
-// OFX actions
-// ============================================================================
 static OfxStatus action_load() {
     gEffectSuite=(OfxImageEffectSuiteV1*)gHost->fetchSuite(gHost->host,kOfxImageEffectSuite,1);
     gPropSuite  =(OfxPropertySuiteV1*)  gHost->fetchSuite(gHost->host,kOfxPropertySuite,   1);
@@ -362,6 +348,7 @@ static OfxStatus action_describe(OfxImageEffectHandle handle) {
     return kOfxStatOK;
 }
 
+// helpers for declaring params without repeating 8 lines every time
 #define DEF_D(id_,lbl_,hint_,def_,mn_,mx_,dmn_,dmx_,par_)                       \
     gParamSuite->paramDefine(paramSet,kOfxParamTypeDouble,id_,&pProps);           \
     gPropSuite->propSetString(pProps,kOfxPropLabel,           0,lbl_);            \
@@ -381,12 +368,12 @@ static OfxStatus action_describe(OfxImageEffectHandle handle) {
     gPropSuite->propSetInt   (pProps,kOfxParamPropDefault,  0,(def_)?1:0);        \
     if((par_)[0]) gPropSuite->propSetString(pProps,kOfxParamPropParent,0,par_);
 
-// Emits the 5 core per-stage controls (Active, Filter, Strength, Size, Warmth)
+// 5 main controls per stage
 #define DEF_STAGE_BASIC(ACTIVE_,FILT_,STR_,SZ_,WM_, ACTIVE_DEF_,STR_DEF_, GRP_) \
-    DEF_B(ACTIVE_,"Active","Enable this diffusion stage.",ACTIVE_DEF_,GRP_)       \
+    DEF_B(ACTIVE_,"Active","Turn this stage on or off.",ACTIVE_DEF_,GRP_)         \
     gParamSuite->paramDefine(paramSet,kOfxParamTypeChoice,FILT_,&pProps);         \
     gPropSuite->propSetString(pProps,kOfxPropLabel,            0,"Filter Type");  \
-    gPropSuite->propSetString(pProps,kOfxParamPropHint,        0,"Diffusion character preset."); \
+    gPropSuite->propSetString(pProps,kOfxParamPropHint,        0,"Which filter to emulate."); \
     gPropSuite->propSetInt   (pProps,kOfxParamPropDefault,     0,1);              \
     gPropSuite->propSetString(pProps,kOfxParamPropChoiceOption,0,"Glimmerglass"); \
     gPropSuite->propSetString(pProps,kOfxParamPropChoiceOption,1,"Black Pro-Mist"); \
@@ -394,28 +381,26 @@ static OfxStatus action_describe(OfxImageEffectHandle handle) {
     gPropSuite->propSetString(pProps,kOfxParamPropChoiceOption,3,"CineBloom");    \
     gPropSuite->propSetString(pProps,kOfxParamPropParent,      0,GRP_);           \
     DEF_D(STR_,"Strength",                                                        \
-        "Filter strength in commercial stops: 0.125=1/8, 0.25=1/4, 0.5=1/2, 1.0=full, 2.0=heavy.", \
+        "How strong the filter is. Matches commercial stop ratings: 0.125=1/8, 0.25=1/4, 0.5=1/2, 1.0=full, 2.0=heavy.", \
         STR_DEF_, 0.0,2.0, 0.0,2.0, GRP_)                                        \
-    DEF_D(SZ_,"Size",                                                             \
-        "Spatial scale multiplier on all PSF lambdas.",                           \
+    DEF_D(SZ_,"Size","Scale all blur radii up or down.",                          \
         1.0, 0.1,4.0, 0.1,4.0, GRP_)                                             \
-    DEF_D(WM_,"Warmth",                                                           \
-        "Halo colour tint. +1=warm yellow outer rim, -1=cool blue outer rim.",    \
+    DEF_D(WM_,"Warmth","Tint the halo. +1 = warm yellowish glow, -1 = cool blue.", \
         0.0, -1.5,1.5, -1.5,1.5, GRP_)
 
-// Emits the 6 advanced per-stage component controls
+// 6 fine-tuning controls per stage (under Advanced)
 #define DEF_STAGE_ADV(CI_,CS_,HI_,HS_,BI_,BS_, GRP_)                            \
-    DEF_D(CI_,"Core Intensity","Core weight multiplier. 1.0=family default.",     \
+    DEF_D(CI_,"Core Intensity","Core brightness multiplier.",                     \
         1.0, 0.0,4.0, 0.0,4.0, GRP_)                                             \
-    DEF_D(CS_,"Core Size","Core PSF radius multiplier. 1.0=family default.",      \
+    DEF_D(CS_,"Core Size","Core radius multiplier.",                              \
         1.0, 0.1,4.0, 0.1,4.0, GRP_)                                             \
-    DEF_D(HI_,"Halo Intensity","Halo weight multiplier. 1.0=family default.",     \
+    DEF_D(HI_,"Halo Intensity","Halo brightness multiplier.",                     \
         1.0, 0.0,4.0, 0.0,4.0, GRP_)                                             \
-    DEF_D(HS_,"Halo Size","Halo PSF radius multiplier. 1.0=family default.",      \
+    DEF_D(HS_,"Halo Size","Halo radius multiplier.",                              \
         1.0, 0.1,4.0, 0.1,4.0, GRP_)                                             \
-    DEF_D(BI_,"Bloom Intensity","Bloom weight multiplier. 1.0=family default.",   \
+    DEF_D(BI_,"Bloom Intensity","Bloom brightness multiplier.",                   \
         1.0, 0.0,4.0, 0.0,4.0, GRP_)                                             \
-    DEF_D(BS_,"Bloom Size","Bloom PSF radius multiplier. 1.0=family default.",    \
+    DEF_D(BS_,"Bloom Size","Bloom radius multiplier.",                            \
         1.0, 0.1,4.0, 0.1,4.0, GRP_)
 
 static OfxStatus action_describe_in_context(OfxImageEffectHandle handle,
@@ -433,12 +418,10 @@ static OfxStatus action_describe_in_context(OfxImageEffectHandle handle,
     gEffectSuite->getParamSet(handle,&paramSet);
     OfxPropertySetHandle pProps;
 
-    // ── Global blend ─────────────────────────────────────────────────────────
     DEF_D(kParamMix, "Mix",
-        "Global wet/dry blend. 0=original, 1=full diffusion.",
+        "Blend between original and diffused. 0=off, 1=full.",
         1.0, 0.0,1.0, 0.0,1.0, "")
 
-    // ── Lens stage ────────────────────────────────────────────────────────────
     gParamSuite->paramDefine(paramSet,kOfxParamTypeGroup,"LensGroup",&pProps);
     gPropSuite->propSetString(pProps,kOfxPropLabel,         0,"Lens");
     gPropSuite->propSetInt   (pProps,kOfxParamPropGroupOpen,0,1);
@@ -452,7 +435,6 @@ static OfxStatus action_describe_in_context(OfxImageEffectHandle handle,
     gPropSuite->propSetString(pProps,kOfxPropLabel,       0,"");
     gPropSuite->propSetInt   (pProps,kOfxParamPropSecret, 0,1);
 
-    // ── Print stage ───────────────────────────────────────────────────────────
     gParamSuite->paramDefine(paramSet,kOfxParamTypeGroup,"PrintGroup",&pProps);
     gPropSuite->propSetString(pProps,kOfxPropLabel,         0,"Print");
     gPropSuite->propSetInt   (pProps,kOfxParamPropGroupOpen,0,0);
@@ -466,23 +448,21 @@ static OfxStatus action_describe_in_context(OfxImageEffectHandle handle,
     gPropSuite->propSetString(pProps,kOfxPropLabel,       0,"");
     gPropSuite->propSetInt   (pProps,kOfxParamPropSecret, 0,1);
 
-    // ── Advanced ──────────────────────────────────────────────────────────────
     gParamSuite->paramDefine(paramSet,kOfxParamTypeGroup,"AdvGroup",&pProps);
     gPropSuite->propSetString(pProps,kOfxPropLabel,         0,"Advanced");
     gPropSuite->propSetInt   (pProps,kOfxParamPropGroupOpen,0,0);
 
     DEF_D(kParamPixelSize,"Sensor Pixel um",
-        "Physical pixel pitch in micrometers. 6.0=typical cinema camera. "
-        "Scales all PSF sizes together with the Size slider.",
+        "Physical pixel size in micrometers. 6.0 is typical for a cinema camera. "
+        "Affects the absolute scale of the blur.",
         6.0, 1.0,24.0, 1.0,24.0, "AdvGroup")
 
     DEF_D(kParamStretch,"Anamorphic Stretch",
-        "Stretch the PSF horizontally. 1.0=circular. 2.0=oval bloom twice as wide as tall.",
+        "Stretch the glow horizontally. 1.0=round, 2.0=oval twice as wide as tall.",
         1.0, 0.5,4.0, 0.5,4.0, "AdvGroup")
 
     DEF_D(kParamChroma,"Chroma Shift",
-        "Chromatic aberration on bloom: R scatters wider, B scatters tighter. "
-        "0=off. Applies to both stages.",
+        "Chromatic aberration in the bloom. Red scatters further, blue less. 0=off.",
         0.0, 0.0,0.5, 0.0,0.5, "AdvGroup")
 
     DEF_STAGE_ADV(
@@ -504,9 +484,6 @@ static OfxStatus action_describe_in_context(OfxImageEffectHandle handle,
     return kOfxStatOK;
 }
 
-// ============================================================================
-// is identity
-// ============================================================================
 static OfxStatus action_is_identity(OfxImageEffectHandle handle,
                                      OfxPropertySetHandle inArgs,
                                      OfxPropertySetHandle outArgs) {
@@ -537,9 +514,6 @@ static OfxStatus action_is_identity(OfxImageEffectHandle handle,
     return kOfxStatReplyDefault;
 }
 
-// ============================================================================
-// get ROI
-// ============================================================================
 static OfxStatus action_get_roi(OfxImageEffectHandle handle,
                                  OfxPropertySetHandle inArgs,
                                  OfxPropertySetHandle outArgs) {
@@ -583,9 +557,6 @@ static OfxStatus action_get_roi(OfxImageEffectHandle handle,
     return kOfxStatOK;
 }
 
-// ============================================================================
-// render
-// ============================================================================
 static OfxStatus action_render(OfxImageEffectHandle handle,
                                 OfxPropertySetHandle inArgs)
 {
@@ -601,14 +572,12 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
         int v=def; gParamSuite->paramGetValueAtTime(ph,time,&v); return v;
     };
 
-    // Global
     double mix    = std::max(0.0,std::min(1.0, gd(kParamMix,      1.0)));
     double pixelUm= std::max(1e-6,              gd(kParamPixelSize,6.0));
     double stretch= std::max(0.01,              gd(kParamStretch,  1.0));
     double chroma = std::max(0.0,               gd(kParamChroma,   0.0));
     double sq_str = std::sqrt(stretch);
 
-    // Lens
     bool   lensOn = (bool)gi(kParamLensActive, 1);
     int    lensFi = std::max(0,std::min(kNumFamilies-1,gi(kParamLensFilter,1)));
     double lensSt = gd(kParamLensStrength,1.0);
@@ -622,7 +591,6 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
     double lensBS = std::max(1e-6, gd(kParamLensBloomSize,1.0));
     double lensPS = (lensOn && lensSt>0) ? strength_to_ps(lensSt,lensFi) : 0.0;
 
-    // Print
     bool   prnOn = (bool)gi(kParamPrintActive, 0);
     int    prnFi = std::max(0,std::min(kNumFamilies-1,gi(kParamPrintFilter,1)));
     double prnSt = gd(kParamPrintStrength,0.5);
@@ -636,7 +604,6 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
     double prnBS = std::max(1e-6, gd(kParamPrintBloomSize,1.0));
     double prnPS = (prnOn && prnSt>0) ? strength_to_ps(prnSt,prnFi) : 0.0;
 
-    // Clips
     OfxImageClipHandle srcClip,dstClip;
     gEffectSuite->clipGetHandle(handle,kOfxImageEffectSimpleSourceClipName,&srcClip,nullptr);
     gEffectSuite->clipGetHandle(handle,kOfxImageEffectOutputClipName,&dstClip,nullptr);
@@ -666,8 +633,7 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
     int srcW=sb[2]-sb[0], srcH=sb[3]-sb[1];
     int dstW=db[2]-db[0], dstH=db[3]-db[1];
 
-    // Pass source through unchanged when there is no effect to apply —
-    // never leave the output buffer uninitialised (white frame).
+    // pass source through if there's nothing to do — avoids a white frame at Strength=0
     bool hasEffect = (mix>0) && (lensPS>0 || prnPS>0);
     if (!hasEffect || srcW<=0||srcH<=0||dstW<=0||dstH<=0) {
         if (srcW>0&&srcH>0&&dstW>0&&dstH>0) {
@@ -688,12 +654,8 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
 
     Buf src = read_image(sd,srcW,srcH,srb,snc);
 
-    // ── Accumulate PSF from active stages ────────────────────────────────────
-    // psf_acc = p_sL*(K_L*src) + p_sP*(K_P*src)   [p_s baked into coefficients]
-    //
-    // Final formula (exact spektrafilm per-stage, combined):
-    //   result = src + mix * (psf_acc - ps_total*src)
-    //          = (1 - mix*ps_total)*src + mix*psf_acc
+    // sum the two stages into psf_acc, then combine:
+    //   result = src + mix * (psf_acc - ps_total * src)
     Buf psf_acc((size_t)srcW*srcH*4, 0.0f);
     Buf tmp    ((size_t)srcW*srcH*4);
     double ps_total = 0.0;
@@ -710,7 +672,6 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
         prnCI, prnCS, prnHI, prnHS, prnBI, prnBS,
         chroma, psf_acc, tmp);
 
-    // ── Final mix ─────────────────────────────────────────────────────────────
     int ox=db[0]-sb[0], oy=db[1]-sb[1];
     float fmix=(float)mix, fps=(float)ps_total;
 
@@ -733,9 +694,6 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
     return kOfxStatOK;
 }
 
-// ============================================================================
-// OFX plumbing
-// ============================================================================
 static OfxStatus main_entry(const char *action, const void *handle,
                              OfxPropertySetHandle inArgs,
                              OfxPropertySetHandle outArgs)
