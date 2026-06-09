@@ -34,7 +34,7 @@ static OfxParameterSuiteV1   *gParamSuite  = nullptr;
 static OfxMemorySuiteV1      *gMemorySuite = nullptr;
 
 static const char *kPluginId = "com.nimbusdiffusor.NimbusDiffusion";
-static const int kMajorVer = 2, kMinorVer = 3;
+static const int kMajorVer = 2, kMinorVer = 4;
 
 // param IDs
 #define kParamMix           "Mix"
@@ -65,6 +65,11 @@ static const int kMajorVer = 2, kMinorVer = 3;
 #define kParamPrintHaloSize  "PrintHaloSize"
 #define kParamPrintBloom     "PrintBloomIntensity"
 #define kParamPrintBloomSize "PrintBloomSize"
+// detail recovery + vignette
+#define kParamDetail        "Detail"
+#define kParamDetailRadius  "DetailRadius"
+#define kParamVignette      "Vignette"
+#define kParamVigFeather    "VignetteFeather"
 
 // filter presets, from spektrafilm's characterization
 static const int MAX_SUB = 4;
@@ -425,6 +430,15 @@ static OfxStatus action_describe_in_context(OfxImageEffectHandle handle,
         "Blend between original and diffused. 0=off, 1=full.",
         1.0, 0.0,1.0, 0.0,1.0, "")
 
+    DEF_D(kParamDetail, "Detail Recovery",
+        "Recovers sharpness lost to diffusion — adds back an unsharp mask of the source. "
+        "0=off, 1=maximum. Use Detail Radius to pick the texture frequency.",
+        0.0, 0.0,1.0, 0.0,1.0, "")
+    DEF_D(kParamDetailRadius, "Detail Radius",
+        "Blur radius (pixels) used for detail recovery. "
+        "Smaller = sharpen fine grain/texture; larger = recover broader structure.",
+        1.5, 0.5,4.0, 0.5,4.0, "")
+
     gParamSuite->paramDefine(paramSet,kOfxParamTypeGroup,"LensGroup",&pProps);
     gPropSuite->propSetString(pProps,kOfxPropLabel,         0,"Lens");
     gPropSuite->propSetInt   (pProps,kOfxParamPropGroupOpen,0,1);
@@ -448,6 +462,22 @@ static OfxStatus action_describe_in_context(OfxImageEffectHandle handle,
         /*active_def=*/false, /*str_def=*/0.5, "PrintGroup")
 
     gParamSuite->paramDefine(paramSet,kOfxParamTypeGroup,"PrintGroupEnd",&pProps);
+    gPropSuite->propSetString(pProps,kOfxPropLabel,       0,"");
+    gPropSuite->propSetInt   (pProps,kOfxParamPropSecret, 0,1);
+
+    gParamSuite->paramDefine(paramSet,kOfxParamTypeGroup,"VignetteGroup",&pProps);
+    gPropSuite->propSetString(pProps,kOfxPropLabel,         0,"Vignette");
+    gPropSuite->propSetInt   (pProps,kOfxParamPropGroupOpen,0,0);
+
+    DEF_D(kParamVignette, "Amount",
+        "How much to darken the edges. 0=off, 1=full black corners.",
+        0.0, 0.0,1.0, 0.0,1.0, "VignetteGroup")
+    DEF_D(kParamVigFeather, "Feather",
+        "How gradually the vignette falls off toward the center. "
+        "Low = hard edge starting near corners; high = very soft, starts from center.",
+        0.5, 0.0,1.0, 0.0,1.0, "VignetteGroup")
+
+    gParamSuite->paramDefine(paramSet,kOfxParamTypeGroup,"VignetteGroupEnd",&pProps);
     gPropSuite->propSetString(pProps,kOfxPropLabel,       0,"");
     gPropSuite->propSetInt   (pProps,kOfxParamPropSecret, 0,1);
 
@@ -496,7 +526,7 @@ static OfxStatus action_describe_in_context(OfxImageEffectHandle handle,
     gParamSuite->paramDefine(paramSet,kOfxParamTypeString,"AboutText",&pProps);
     gPropSuite->propSetString(pProps,kOfxPropLabel,           0,"");
     gPropSuite->propSetString(pProps,kOfxParamPropDefault,    0,
-        "Nimbus Diffusion v2.3  |  Copyright 2026 Mohamed Mabrok  |  GPL v3 — free & open source");
+        "Nimbus Diffusion v2.4  |  Copyright 2026 Mohamed Mabrok  |  GPL v3 — free & open source");
     gPropSuite->propSetString(pProps,kOfxParamPropStringMode, 0,kOfxParamStringIsLabel);
     gPropSuite->propSetInt   (pProps,kOfxParamPropEnabled,    0,0);
 
@@ -518,7 +548,9 @@ static OfxStatus action_is_identity(OfxImageEffectHandle handle,
         int v=def; gParamSuite->paramGetValueAtTime(ph,time,&v); return v;
     };
 
-    if (gi(kParamShowMatte,0)) return kOfxStatReplyDefault; // always render when matte is on
+    if (gi(kParamShowMatte,0))       return kOfxStatReplyDefault;
+    if (gd(kParamVignette,0.0) > 0) return kOfxStatReplyDefault;
+    if (gd(kParamDetail,0.0)   > 0) return kOfxStatReplyDefault;
     if (gd(kParamMix,1.0) <= 0) {
         gPropSuite->propSetString(outArgs,kOfxPropName,0,kOfxImageEffectSimpleSourceClipName);
         gPropSuite->propSetDouble(outArgs,kOfxPropTime,0,time);
@@ -625,6 +657,11 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
     double prnBS = std::max(1e-6, gd(kParamPrintBloomSize,1.0));
     double prnPS = (prnOn && prnSt>0) ? strength_to_ps(prnSt,prnFi) : 0.0;
 
+    double detail     = std::max(0.0,std::min(1.0, gd(kParamDetail,      0.0)));
+    double detailRad  = std::max(0.5,              gd(kParamDetailRadius, 1.5));
+    double vignette   = std::max(0.0,std::min(1.0, gd(kParamVignette,    0.0)));
+    double vigFeather = std::max(0.01,std::min(1.0,gd(kParamVigFeather,  0.5)));
+
     OfxImageClipHandle srcClip,dstClip;
     gEffectSuite->clipGetHandle(handle,kOfxImageEffectSimpleSourceClipName,&srcClip,nullptr);
     gEffectSuite->clipGetHandle(handle,kOfxImageEffectOutputClipName,&dstClip,nullptr);
@@ -655,7 +692,8 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
     int dstW=db[2]-db[0], dstH=db[3]-db[1];
 
     // pass source through if there's nothing to do — avoids a white frame at Strength=0
-    bool hasEffect = ((mix>0) && (lensPS>0 || prnPS>0)) || showMatte;
+    bool hasEffect = ((mix>0) && (lensPS>0 || prnPS>0)) || showMatte
+                     || (vignette>0.0) || (detail>0.0);
     if (!hasEffect || srcW<=0||srcH<=0||dstW<=0||dstH<=0) {
         if (srcW>0&&srcH>0&&dstW>0&&dstH>0) {
             Buf pt=read_image(sd,srcW,srcH,srb,snc);
@@ -710,7 +748,8 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
         }
     }
 
-    // matte mode — replace output with grayscale showing where glow was added
+    // matte mode — early return with a grayscale map of the diffusion contribution
+    // (detail/vignette are intentionally excluded so you see only the glow amount)
     if (showMatte) {
         for (int y=0;y<dstH;++y){
             int sy=y+oy; if(sy<0||sy>=srcH) continue;
@@ -723,6 +762,54 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
                      (result[di+1]-src[si+1])+
                      (result[di+2]-src[si+2]))/3.0f*5.0f);
                 result[di+0]=result[di+1]=result[di+2]=v;
+            }
+        }
+        write_image(result,dd,dstW,dstH,drb,dnc);
+        release();
+        return kOfxStatOK;
+    }
+
+    // detail recovery — unsharp mask on source to bring back texture lost to diffusion
+    // adds  detail * (src - blur(src, radius))  to the diffused result
+    if (detail > 0.0) {
+        double dlam = std::max(0.5, detailRad);
+        double dlh[3]={dlam,dlam,dlam}, dlv[3]={dlam,dlam,dlam};
+        Buf sharp;
+        exp_blur_from(src, sharp, srcW, srcH, dlh, dlv);
+        float fd=(float)detail;
+        for (int y=0;y<dstH;++y){
+            int sy=y+oy; if(sy<0||sy>=srcH) continue;
+            for (int x=0;x<dstW;++x){
+                int sx=x+ox; if(sx<0||sx>=srcW) continue;
+                size_t si=(size_t)(sy*srcW+sx)*4;
+                size_t di=(size_t)(y *dstW+x )*4;
+                result[di+0]+=fd*(src[si+0]-sharp[si+0]);
+                result[di+1]+=fd*(src[si+1]-sharp[si+1]);
+                result[di+2]+=fd*(src[si+2]-sharp[si+2]);
+            }
+        }
+    }
+
+    // vignette — smooth radial darkening toward the corners
+    if (vignette > 0.0) {
+        float cx=(float)srcW*0.5f, cy=(float)srcH*0.5f;
+        float fvig=(float)vignette;
+        float ffeat=std::max(0.01f,(float)vigFeather);
+        for (int y=0;y<dstH;++y){
+            int sy=y+oy; if(sy<0||sy>=srcH) continue;
+            for (int x=0;x<dstW;++x){
+                int sx=x+ox; if(sx<0||sx>=srcW) continue;
+                // normalize: (0,0)=center, (±1,±1)=edges, corners at r≈1.41
+                float nx=(sx-cx)/cx, ny=(sy-cy)/cy;
+                float r=std::sqrt(nx*nx+ny*ny)/1.4142f; // 0=center, 1=corner
+                float start=1.0f-ffeat;
+                float t=std::max(0.0f,std::min(1.0f,(r-start)/ffeat));
+                t=t*t*(3.0f-2.0f*t); // smoothstep — no harsh edge
+                float v=1.0f-fvig*t;
+                size_t di=(size_t)(y*dstW+x)*4;
+                result[di+0]*=v;
+                result[di+1]*=v;
+                result[di+2]*=v;
             }
         }
     }
