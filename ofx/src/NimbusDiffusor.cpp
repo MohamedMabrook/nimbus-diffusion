@@ -34,7 +34,7 @@ static OfxParameterSuiteV1   *gParamSuite  = nullptr;
 static OfxMemorySuiteV1      *gMemorySuite = nullptr;
 
 static const char *kPluginId = "com.nimbusdiffusor.NimbusDiffusion";
-static const int kMajorVer = 2, kMinorVer = 7;
+static const int kMajorVer = 2, kMinorVer = 8;
 
 // param IDs
 #define kParamMix           "Mix"
@@ -49,7 +49,6 @@ static const int kMajorVer = 2, kMinorVer = 7;
 #define kParamPrintSize     "PrintSize"
 #define kParamPrintWarmth   "PrintWarmth"
 // advanced
-#define kParamShowMatte      "ShowMatte"
 #define kParamPixelSize      "SensorPixelUm"
 #define kParamStretch        "Stretch"
 #define kParamChroma         "ChromaShift"
@@ -70,14 +69,6 @@ static const int kMajorVer = 2, kMinorVer = 7;
 #define kParamDetailRadius  "DetailRadius"
 #define kParamVignette      "Vignette"
 #define kParamVigFeather    "VignetteFeather"
-// depth map
-#define kParamDepthStr      "DepthStrength"
-#define kParamFocusPoint    "FocusPoint"
-#define kParamFocusZone     "FocusZone"
-#define kParamLumaLow       "LumaLow"
-#define kParamLumaHigh      "LumaHigh"
-#define kParamLumaFeather   "LumaFeather"
-#define kParamShowDepth     "ShowDepthMap"
 
 // filter presets, from spektrafilm's characterization
 static const int MAX_SUB = 4;
@@ -514,47 +505,6 @@ static OfxStatus action_describe_in_context(OfxImageEffectHandle handle,
     gPropSuite->propSetString(pProps,kOfxPropLabel,       0,"");
     gPropSuite->propSetInt   (pProps,kOfxParamPropSecret, 0,1);
 
-    gParamSuite->paramDefine(paramSet,kOfxParamTypeGroup,"DepthGroup",&pProps);
-    gPropSuite->propSetString(pProps,kOfxPropLabel,         0,"Depth Map");
-    gPropSuite->propSetInt   (pProps,kOfxParamPropGroupOpen,0,0);
-
-    // Focus Zone — simulates depth-of-field: diffusion falls off toward the focal row.
-    // 0 = uniform (disabled), 1 = no diffusion at focus, full diffusion at frame edges.
-    DEF_D(kParamDepthStr, "Depth Strength",
-        "How strongly the depth zone masks the diffusion. "
-        "0=diffusion everywhere. 1=no diffusion at the focal row, full diffusion at the frame edges.",
-        0.0, 0.0,1.0, 0.0,1.0, "DepthGroup")
-    DEF_D(kParamFocusPoint, "Focus Point",
-        "Vertical position of the in-focus row. 0=top of frame, 0.5=center, 1=bottom.",
-        0.5, 0.0,1.0, 0.0,1.0, "DepthGroup")
-    DEF_D(kParamFocusZone, "Focus Zone Size",
-        "Width of the sharp zone as a fraction of frame height. "
-        "0=hairline, 0.5=half the frame stays sharp.",
-        0.3, 0.0,1.0, 0.0,1.0, "DepthGroup")
-
-    // Luma Isolation — restrict diffusion to a luminance band (e.g. highlights only).
-    DEF_D(kParamLumaLow, "Luma Low",
-        "Diffusion only applies above this luminance. "
-        "Raise to push the effect toward highlights. 0=no lower cutoff.",
-        0.0, 0.0,1.0, 0.0,1.0, "DepthGroup")
-    DEF_D(kParamLumaHigh, "Luma High",
-        "Diffusion only applies below this luminance. "
-        "Lower to push the effect toward shadows. 1=no upper cutoff.",
-        1.0, 0.0,1.0, 0.0,1.0, "DepthGroup")
-    DEF_D(kParamLumaFeather, "Luma Feather",
-        "Softness of the luminance cutoff edges.",
-        0.05, 0.0,0.5, 0.0,0.5, "DepthGroup")
-
-    // preview — shows exactly which pixels receive diffusion
-    DEF_B(kParamShowDepth, "Preview Depth Map",
-        "Replaces the output with the depth/luma mask — white pixels get full diffusion, "
-        "black pixels get none. Use this to tune Focus Zone and Luma Isolation.",
-        false, "DepthGroup")
-
-    gParamSuite->paramDefine(paramSet,kOfxParamTypeGroup,"DepthGroupEnd",&pProps);
-    gPropSuite->propSetString(pProps,kOfxPropLabel,       0,"");
-    gPropSuite->propSetInt   (pProps,kOfxParamPropSecret, 0,1);
-
     gParamSuite->paramDefine(paramSet,kOfxParamTypeGroup,"AdvGroup",&pProps);
     gPropSuite->propSetString(pProps,kOfxPropLabel,         0,"Advanced");
     gPropSuite->propSetInt   (pProps,kOfxParamPropGroupOpen,0,0);
@@ -590,17 +540,11 @@ static OfxStatus action_describe_in_context(OfxImageEffectHandle handle,
     gPropSuite->propSetString(pProps,kOfxPropLabel,       0,"");
     gPropSuite->propSetInt   (pProps,kOfxParamPropSecret, 0,1);
 
-    // show matte — outputs the glow contribution as a grayscale map
-    DEF_B(kParamShowMatte,"Show Effect Matte",
-        "Replaces the output with a grayscale map showing where diffusion light is being added. "
-        "Bright = more glow. Turn this on to check what's being affected.",
-        false, "")
-
     // about
     gParamSuite->paramDefine(paramSet,kOfxParamTypeString,"AboutText",&pProps);
     gPropSuite->propSetString(pProps,kOfxPropLabel,           0,"Info");
     gPropSuite->propSetString(pProps,kOfxParamPropDefault,    0,
-        "Nimbus Diffusion v2.7  |  Copyright 2026 Mohamed Mabrok  |  GPL v3 — free & open source");
+        "Nimbus Diffusion v2.8  |  Copyright 2026 Mohamed Mabrok  |  GPL v3 — free & open source");
     gPropSuite->propSetString(pProps,kOfxParamPropStringMode, 0,kOfxParamStringIsLabel);
     gPropSuite->propSetInt   (pProps,kOfxParamPropEnabled,    0,0);
 
@@ -622,8 +566,6 @@ static OfxStatus action_is_identity(OfxImageEffectHandle handle,
         int v=def; gParamSuite->paramGetValueAtTime(ph,time,&v); return v;
     };
 
-    if (gi(kParamShowMatte,0))       return kOfxStatReplyDefault;
-    if (gi(kParamShowDepth,0))       return kOfxStatReplyDefault;
     if (gd(kParamVignette,0.0) > 0) return kOfxStatReplyDefault;
     if (gd(kParamDetail,0.0)   > 0) return kOfxStatReplyDefault;
     if (gd(kParamMix,1.0) <= 0) {
@@ -684,12 +626,6 @@ static OfxStatus action_get_roi(OfxImageEffectHandle handle,
     return kOfxStatOK;
 }
 
-// smoothstep between lo and hi — clamped, no edge cases
-static inline float smsp(float lo, float hi, float x) {
-    float t = std::max(0.0f, std::min(1.0f, (x-lo) / std::max(1e-7f, hi-lo)));
-    return t*t*(3.0f-2.0f*t);
-}
-
 static OfxStatus action_render(OfxImageEffectHandle handle,
                                 OfxPropertySetHandle inArgs)
 {
@@ -706,7 +642,6 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
     };
 
     double mix      = std::max(0.0,std::min(1.0, gd(kParamMix,      1.0)));
-    bool   showMatte= (bool)gi(kParamShowMatte, 0);
     double pixelUm  = std::max(1e-6,            gd(kParamPixelSize,12.4));
     double stretch= std::max(0.01,              gd(kParamStretch,  1.0));
     double chroma = std::max(0.0,               gd(kParamChroma,   0.0));
@@ -742,19 +677,6 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
     double detailRad  = std::max(0.5,              gd(kParamDetailRadius, 1.5));
     double vignette   = std::max(0.0,std::min(1.0, gd(kParamVignette,    0.0)));
     double vigFeather = std::max(0.01,std::min(1.0,gd(kParamVigFeather,  0.5)));
-    double depthStr   = std::max(0.0,std::min(1.0, gd(kParamDepthStr,    0.0)));
-    double focusPoint = std::max(0.0,std::min(1.0, gd(kParamFocusPoint,  0.5)));
-    double focusZone  = std::max(0.0,std::min(1.0, gd(kParamFocusZone,   0.3)));
-    double lumaLow    = std::max(0.0,std::min(1.0, gd(kParamLumaLow,     0.0)));
-    double lumaHigh   = std::max(0.0,std::min(1.0, gd(kParamLumaHigh,    1.0)));
-    double lumaFeat   = std::max(0.001,             gd(kParamLumaFeather, 0.05));
-    bool   showDepth  = (bool)gi(kParamShowDepth, 0);
-    bool   useDepth   = depthStr > 0.0;
-    bool   useLuma    = (lumaLow > 0.001 || lumaHigh < 0.999);
-    // pre-convert for inner loops — needed before the depth-preview early return too
-    float ffp=(float)focusPoint, fhz=std::max(0.001f,(float)focusZone*0.5f);
-    float fdepth=(float)depthStr;
-    float fll=(float)lumaLow, flh=(float)lumaHigh, flf=std::max(0.001f,(float)lumaFeat);
 
     OfxImageClipHandle srcClip,dstClip;
     gEffectSuite->clipGetHandle(handle,kOfxImageEffectSimpleSourceClipName,&srcClip,nullptr);
@@ -787,7 +709,7 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
     int ox=db[0]-sb[0], oy=db[1]-sb[1];
 
     // pass source through if there's nothing to do — avoids a white frame at Strength=0
-    bool hasEffect = ((mix>0) && (lensPS>0 || prnPS>0)) || showMatte || showDepth
+    bool hasEffect = ((mix>0) && (lensPS>0 || prnPS>0))
                      || (vignette>0.0) || (detail>0.0);
     if (!hasEffect || srcW<=0||srcH<=0||dstW<=0||dstH<=0) {
         if (srcW>0&&srcH>0&&dstW>0&&dstH>0) {
@@ -807,40 +729,6 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
     }
 
     Buf src = read_image(sd,srcW,srcH,srb,snc);
-
-    // depth map preview — white = full diffusion, black = no diffusion
-    // returned immediately so we skip all the expensive blurring
-    if (showDepth) {
-        Buf result((size_t)dstW*dstH*4, 0.0f);
-        for (int y=0;y<dstH;++y){
-            int sy=y+oy; if(sy<0||sy>=srcH) continue;
-            float dm=1.0f;
-            if (useDepth){
-                float fy=(srcH>1)?(float)sy/(float)(srcH-1):0.5f;
-                float dy=std::abs(fy-ffp);
-                float t=smsp(0.0f,fhz,dy-fhz);
-                dm=1.0f-fdepth*(1.0f-t);
-            }
-            for (int x=0;x<dstW;++x){
-                int sx=x+ox; if(sx<0||sx>=srcW) continue;
-                size_t si=(size_t)(sy*srcW+sx)*4;
-                size_t di=(size_t)(y *dstW+x )*4;
-                float lm=1.0f;
-                if (useLuma){
-                    float luma=0.2126f*src[si+0]+0.7152f*src[si+1]+0.0722f*src[si+2];
-                    float tlo=(lumaLow>0.001)?smsp(fll-flf,fll+flf,luma):1.0f;
-                    float thi=(lumaHigh<0.999)?1.0f-smsp(flh-flf,flh+flf,luma):1.0f;
-                    lm=tlo*thi;
-                }
-                float m=dm*lm;
-                result[di+0]=result[di+1]=result[di+2]=m;
-                result[di+3]=src[si+3];
-            }
-        }
-        write_image(result,dd,dstW,dstH,drb,dnc);
-        release();
-        return kOfxStatOK;
-    }
 
     // sum the two stages into psf_acc, then combine:
     //   result = src + mix * (psf_acc - ps_total * src)
@@ -865,59 +753,15 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
     Buf result((size_t)dstW*dstH*4, 0.0f);
     for (int y=0;y<dstH;++y){
         int sy=y+oy; if(sy<0||sy>=srcH) continue;
-
-        // depth mask — only depends on Y, so compute once per row
-        float depth_mask = 1.0f;
-        if (useDepth) {
-            float fy = (srcH>1) ? (float)sy/(float)(srcH-1) : 0.5f;
-            float dy = std::abs(fy - ffp);
-            // 0 inside the focus zone, smoothly rises to 1 outside it
-            float t  = smsp(0.0f, fhz, dy - fhz);
-            // mask = (1-depthStr) inside zone, 1 outside — diffusion weakest at focal row
-            depth_mask = 1.0f - fdepth*(1.0f-t);
-        }
-
         for (int x=0;x<dstW;++x){
             int sx=x+ox; if(sx<0||sx>=srcW) continue;
             size_t si=(size_t)(sy*srcW+sx)*4;
             size_t di=(size_t)(y *dstW+x )*4;
-
-            // luma mask — restrict effect to a brightness range
-            float luma_mask = 1.0f;
-            if (useLuma) {
-                float luma = 0.2126f*src[si+0]+0.7152f*src[si+1]+0.0722f*src[si+2];
-                float tlo = (lumaLow  > 0.001) ? smsp(fll-flf, fll+flf, luma) : 1.0f;
-                float thi = (lumaHigh < 0.999) ? 1.0f - smsp(flh-flf, flh+flf, luma) : 1.0f;
-                luma_mask = tlo * thi;
-            }
-
-            float m = depth_mask * luma_mask;
-            result[di+0]=src[si+0]+m*fmix*(psf_acc[si+0]-fps*src[si+0]);
-            result[di+1]=src[si+1]+m*fmix*(psf_acc[si+1]-fps*src[si+1]);
-            result[di+2]=src[si+2]+m*fmix*(psf_acc[si+2]-fps*src[si+2]);
+            result[di+0]=src[si+0]+fmix*(psf_acc[si+0]-fps*src[si+0]);
+            result[di+1]=src[si+1]+fmix*(psf_acc[si+1]-fps*src[si+1]);
+            result[di+2]=src[si+2]+fmix*(psf_acc[si+2]-fps*src[si+2]);
             result[di+3]=src[si+3];
         }
-    }
-
-    // matte mode — early return with a grayscale map of the diffusion contribution
-    // (detail/vignette are intentionally excluded so you see only the glow amount)
-    if (showMatte) {
-        for (int y=0;y<dstH;++y){
-            int sy=y+oy; if(sy<0||sy>=srcH) continue;
-            for (int x=0;x<dstW;++x){
-                int sx=x+ox; if(sx<0||sx>=srcW) continue;
-                size_t si=(size_t)(sy*srcW+sx)*4;
-                size_t di=(size_t)(y *dstW+x )*4;
-                float v=std::max(0.0f,
-                    ((result[di+0]-src[si+0])+
-                     (result[di+1]-src[si+1])+
-                     (result[di+2]-src[si+2]))/3.0f*5.0f);
-                result[di+0]=result[di+1]=result[di+2]=v;
-            }
-        }
-        write_image(result,dd,dstW,dstH,drb,dnc);
-        release();
-        return kOfxStatOK;
     }
 
     // detail recovery — unsharp mask on source to bring back texture lost to diffusion
