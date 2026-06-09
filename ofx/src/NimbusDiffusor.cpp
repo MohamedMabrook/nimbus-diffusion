@@ -34,7 +34,7 @@ static OfxParameterSuiteV1   *gParamSuite  = nullptr;
 static OfxMemorySuiteV1      *gMemorySuite = nullptr;
 
 static const char *kPluginId = "com.nimbusdiffusor.NimbusDiffusion";
-static const int kMajorVer = 2, kMinorVer = 6;
+static const int kMajorVer = 2, kMinorVer = 7;
 
 // param IDs
 #define kParamMix           "Mix"
@@ -77,6 +77,7 @@ static const int kMajorVer = 2, kMinorVer = 6;
 #define kParamLumaLow       "LumaLow"
 #define kParamLumaHigh      "LumaHigh"
 #define kParamLumaFeather   "LumaFeather"
+#define kParamShowDepth     "ShowDepthMap"
 
 // filter presets, from spektrafilm's characterization
 static const int MAX_SUB = 4;
@@ -544,6 +545,12 @@ static OfxStatus action_describe_in_context(OfxImageEffectHandle handle,
         "Softness of the luminance cutoff edges.",
         0.05, 0.0,0.5, 0.0,0.5, "DepthGroup")
 
+    // preview — shows exactly which pixels receive diffusion
+    DEF_B(kParamShowDepth, "Preview Depth Map",
+        "Replaces the output with the depth/luma mask — white pixels get full diffusion, "
+        "black pixels get none. Use this to tune Focus Zone and Luma Isolation.",
+        false, "DepthGroup")
+
     gParamSuite->paramDefine(paramSet,kOfxParamTypeGroup,"DepthGroupEnd",&pProps);
     gPropSuite->propSetString(pProps,kOfxPropLabel,       0,"");
     gPropSuite->propSetInt   (pProps,kOfxParamPropSecret, 0,1);
@@ -591,9 +598,9 @@ static OfxStatus action_describe_in_context(OfxImageEffectHandle handle,
 
     // about
     gParamSuite->paramDefine(paramSet,kOfxParamTypeString,"AboutText",&pProps);
-    gPropSuite->propSetString(pProps,kOfxPropLabel,           0,"");
+    gPropSuite->propSetString(pProps,kOfxPropLabel,           0,"Info");
     gPropSuite->propSetString(pProps,kOfxParamPropDefault,    0,
-        "Nimbus Diffusion v2.6  |  Copyright 2026 Mohamed Mabrok  |  GPL v3 — free & open source");
+        "Nimbus Diffusion v2.7  |  Copyright 2026 Mohamed Mabrok  |  GPL v3 — free & open source");
     gPropSuite->propSetString(pProps,kOfxParamPropStringMode, 0,kOfxParamStringIsLabel);
     gPropSuite->propSetInt   (pProps,kOfxParamPropEnabled,    0,0);
 
@@ -616,6 +623,7 @@ static OfxStatus action_is_identity(OfxImageEffectHandle handle,
     };
 
     if (gi(kParamShowMatte,0))       return kOfxStatReplyDefault;
+    if (gi(kParamShowDepth,0))       return kOfxStatReplyDefault;
     if (gd(kParamVignette,0.0) > 0) return kOfxStatReplyDefault;
     if (gd(kParamDetail,0.0)   > 0) return kOfxStatReplyDefault;
     if (gd(kParamMix,1.0) <= 0) {
@@ -740,8 +748,13 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
     double lumaLow    = std::max(0.0,std::min(1.0, gd(kParamLumaLow,     0.0)));
     double lumaHigh   = std::max(0.0,std::min(1.0, gd(kParamLumaHigh,    1.0)));
     double lumaFeat   = std::max(0.001,             gd(kParamLumaFeather, 0.05));
+    bool   showDepth  = (bool)gi(kParamShowDepth, 0);
     bool   useDepth   = depthStr > 0.0;
     bool   useLuma    = (lumaLow > 0.001 || lumaHigh < 0.999);
+    // pre-convert for inner loops — needed before the depth-preview early return too
+    float ffp=(float)focusPoint, fhz=std::max(0.001f,(float)focusZone*0.5f);
+    float fdepth=(float)depthStr;
+    float fll=(float)lumaLow, flh=(float)lumaHigh, flf=std::max(0.001f,(float)lumaFeat);
 
     OfxImageClipHandle srcClip,dstClip;
     gEffectSuite->clipGetHandle(handle,kOfxImageEffectSimpleSourceClipName,&srcClip,nullptr);
@@ -771,9 +784,10 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
 
     int srcW=sb[2]-sb[0], srcH=sb[3]-sb[1];
     int dstW=db[2]-db[0], dstH=db[3]-db[1];
+    int ox=db[0]-sb[0], oy=db[1]-sb[1];
 
     // pass source through if there's nothing to do — avoids a white frame at Strength=0
-    bool hasEffect = ((mix>0) && (lensPS>0 || prnPS>0)) || showMatte
+    bool hasEffect = ((mix>0) && (lensPS>0 || prnPS>0)) || showMatte || showDepth
                      || (vignette>0.0) || (detail>0.0);
     if (!hasEffect || srcW<=0||srcH<=0||dstW<=0||dstH<=0) {
         if (srcW>0&&srcH>0&&dstW>0&&dstH>0) {
@@ -794,6 +808,40 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
 
     Buf src = read_image(sd,srcW,srcH,srb,snc);
 
+    // depth map preview — white = full diffusion, black = no diffusion
+    // returned immediately so we skip all the expensive blurring
+    if (showDepth) {
+        Buf result((size_t)dstW*dstH*4, 0.0f);
+        for (int y=0;y<dstH;++y){
+            int sy=y+oy; if(sy<0||sy>=srcH) continue;
+            float dm=1.0f;
+            if (useDepth){
+                float fy=(srcH>1)?(float)sy/(float)(srcH-1):0.5f;
+                float dy=std::abs(fy-ffp);
+                float t=smsp(0.0f,fhz,dy-fhz);
+                dm=1.0f-fdepth*(1.0f-t);
+            }
+            for (int x=0;x<dstW;++x){
+                int sx=x+ox; if(sx<0||sx>=srcW) continue;
+                size_t si=(size_t)(sy*srcW+sx)*4;
+                size_t di=(size_t)(y *dstW+x )*4;
+                float lm=1.0f;
+                if (useLuma){
+                    float luma=0.2126f*src[si+0]+0.7152f*src[si+1]+0.0722f*src[si+2];
+                    float tlo=(lumaLow>0.001)?smsp(fll-flf,fll+flf,luma):1.0f;
+                    float thi=(lumaHigh<0.999)?1.0f-smsp(flh-flf,flh+flf,luma):1.0f;
+                    lm=tlo*thi;
+                }
+                float m=dm*lm;
+                result[di+0]=result[di+1]=result[di+2]=m;
+                result[di+3]=src[si+3];
+            }
+        }
+        write_image(result,dd,dstW,dstH,drb,dnc);
+        release();
+        return kOfxStatOK;
+    }
+
     // sum the two stages into psf_acc, then combine:
     //   result = src + mix * (psf_acc - ps_total * src)
     Buf psf_acc((size_t)srcW*srcH*4, 0.0f);
@@ -812,11 +860,7 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
         prnCI, prnCS, prnHI, prnHS, prnBI, prnBS,
         chroma, psf_acc, tmp);
 
-    int ox=db[0]-sb[0], oy=db[1]-sb[1];
     float fmix=(float)mix, fps=(float)ps_total;
-    float ffp=(float)focusPoint, fhz=std::max(0.001f,(float)focusZone*0.5f);
-    float fdepth=(float)depthStr;
-    float fll=(float)lumaLow, flh=(float)lumaHigh, flf=std::max(0.001f,(float)lumaFeat);
 
     Buf result((size_t)dstW*dstH*4, 0.0f);
     for (int y=0;y<dstH;++y){
