@@ -43,11 +43,15 @@ target_include_directories(NimbusDiffusor PRIVATE
 
 # No runtime dependency on the C++ standard library (keeps the .ofx portable)
 if (MSVC)
-    target_compile_options(NimbusDiffusor PRIVATE /O2 /W3)
+    target_compile_options(NimbusDiffusor PRIVATE /O2 /W3 /openmp)
     # Static-link the CRT so the .ofx doesn't require a VC++ redistributable
     set_property(TARGET NimbusDiffusor PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 else()
+    find_package(OpenMP)
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(NimbusDiffusor PRIVATE OpenMP::OpenMP_CXX)
+    endif()
     target_compile_options(NimbusDiffusor PRIVATE -O3 -Wall)
 endif()
 

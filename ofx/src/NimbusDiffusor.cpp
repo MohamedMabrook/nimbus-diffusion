@@ -145,60 +145,67 @@ static void halo_channel_weights(const double *wts, int n, double warmth,
     }
 }
 
-// separable IIR exponential blur — forward+backward pass, energy-conserving
-// alpha = exp(-1/lambda), per-channel lambda so chromatic bloom can vary R/G/B
+// separable IIR exponential blur — reads src, writes dst, src untouched
+// RGB only (alpha skipped — saves 25% of work)
+// rows and columns are parallelized with OpenMP
 using Buf = std::vector<float>;
 
-static void exp_blur_general(Buf &buf, int w, int h,
-                              const double lam_h[4], const double lam_v[4])
+static void exp_blur_from(const Buf &src, Buf &dst, int w, int h,
+                           const double lam_h[3], const double lam_v[3])
 {
-    float ah[4],omah[4],sh[4], av[4],omav[4],sv[4];
-    for (int c=0;c<4;++c){
+    float ah[3],omah[3],sh[3], av[3],omav[3],sv[3];
+    for (int c=0;c<3;++c){
         ah[c]  =(lam_h[c]>=0.5)?(float)std::exp(-1.0/lam_h[c]):0.0f;
         omah[c]=1.0f-ah[c]; sh[c]=1.0f/(1.0f+ah[c]);
         av[c]  =(lam_v[c]>=0.5)?(float)std::exp(-1.0/lam_v[c]):0.0f;
         omav[c]=1.0f-av[c]; sv[c]=1.0f/(1.0f+av[c]);
     }
-    int mwh=std::max(w,h);
-    std::vector<float> fwd(mwh*4), bwd(mwh*4);
+    dst.resize((size_t)w*h*4);
 
-    for (int y=0;y<h;++y){
-        float *row=buf.data()+(size_t)y*w*4;
-        for (int c=0;c<4;++c) fwd[c]=row[c];
-        for (int x=1;x<w;++x)
-            for (int c=0;c<4;++c)
-                fwd[x*4+c]=omah[c]*row[x*4+c]+ah[c]*fwd[(x-1)*4+c];
-        for (int c=0;c<4;++c) bwd[(w-1)*4+c]=row[(w-1)*4+c];
-        for (int x=w-2;x>=0;--x)
-            for (int c=0;c<4;++c)
-                bwd[x*4+c]=omah[c]*row[x*4+c]+ah[c]*bwd[(x+1)*4+c];
-        for (int x=0;x<w;++x)
-            for (int c=0;c<4;++c)
-                row[x*4+c]=(fwd[x*4+c]+bwd[x*4+c]-omah[c]*row[x*4+c])*sh[c];
+    // horizontal pass: read src, write dst — each row is independent
+    #pragma omp parallel
+    {
+        std::vector<float> fwd(w*3), bwd(w*3);
+        #pragma omp for schedule(static)
+        for (int y=0; y<h; ++y){
+            const float *rs=src.data()+(size_t)y*w*4;
+            float       *rd=dst.data()+(size_t)y*w*4;
+            for (int c=0;c<3;++c) fwd[c]=rs[c];
+            for (int x=1;x<w;++x)
+                for (int c=0;c<3;++c)
+                    fwd[x*3+c]=omah[c]*rs[x*4+c]+ah[c]*fwd[(x-1)*3+c];
+            for (int c=0;c<3;++c) bwd[(w-1)*3+c]=rs[(w-1)*4+c];
+            for (int x=w-2;x>=0;--x)
+                for (int c=0;c<3;++c)
+                    bwd[x*3+c]=omah[c]*rs[x*4+c]+ah[c]*bwd[(x+1)*3+c];
+            for (int x=0;x<w;++x)
+                for (int c=0;c<3;++c)
+                    rd[x*4+c]=(fwd[x*3+c]+bwd[x*3+c]-omah[c]*rs[x*4+c])*sh[c];
+        }
     }
-    std::vector<float> col(h*4);
-    for (int x=0;x<w;++x){
-        for (int y=0;y<h;++y)
-            for (int c=0;c<4;++c)
-                col[y*4+c]=buf[(size_t)(y*w+x)*4+c];
-        for (int c=0;c<4;++c) fwd[c]=col[c];
-        for (int y=1;y<h;++y)
-            for (int c=0;c<4;++c)
-                fwd[y*4+c]=omav[c]*col[y*4+c]+av[c]*fwd[(y-1)*4+c];
-        for (int c=0;c<4;++c) bwd[(h-1)*4+c]=col[(h-1)*4+c];
-        for (int y=h-2;y>=0;--y)
-            for (int c=0;c<4;++c)
-                bwd[y*4+c]=omav[c]*col[y*4+c]+av[c]*bwd[(y+1)*4+c];
-        for (int y=0;y<h;++y)
-            for (int c=0;c<4;++c)
-                buf[(size_t)(y*w+x)*4+c]=(fwd[y*4+c]+bwd[y*4+c]-omav[c]*col[y*4+c])*sv[c];
-    }
-}
 
-static void exp_blur_inplace(Buf &buf, int w, int h, double lam_h, double lam_v) {
-    double lh[4]={lam_h,lam_h,lam_h,lam_h};
-    double lv[4]={lam_v,lam_v,lam_v,lam_v};
-    exp_blur_general(buf,w,h,lh,lv);
+    // vertical pass: in-place on dst — each column is independent
+    #pragma omp parallel
+    {
+        std::vector<float> col(h*3), fwd(h*3), bwd(h*3);
+        #pragma omp for schedule(static)
+        for (int x=0; x<w; ++x){
+            for (int y=0;y<h;++y)
+                for (int c=0;c<3;++c)
+                    col[y*3+c]=dst[(size_t)(y*w+x)*4+c];
+            for (int c=0;c<3;++c) fwd[c]=col[c];
+            for (int y=1;y<h;++y)
+                for (int c=0;c<3;++c)
+                    fwd[y*3+c]=omav[c]*col[y*3+c]+av[c]*fwd[(y-1)*3+c];
+            for (int c=0;c<3;++c) bwd[(h-1)*3+c]=col[(h-1)*3+c];
+            for (int y=h-2;y>=0;--y)
+                for (int c=0;c<3;++c)
+                    bwd[y*3+c]=omav[c]*col[y*3+c]+av[c]*bwd[(y+1)*3+c];
+            for (int y=0;y<h;++y)
+                for (int c=0;c<3;++c)
+                    dst[(size_t)(y*w+x)*4+c]=(fwd[y*3+c]+bwd[y*3+c]-omav[c]*col[y*3+c])*sv[c];
+        }
+    }
 }
 
 static Buf read_image(void *data, int w, int h, int rowBytes, int nComp) {
@@ -275,7 +282,9 @@ static double accumulate_stage(
     for (int k=0; k<cg.n; ++k) {
         if (cw[k]<=0) continue;
         double lam = cl[k]*size/pixelUm;
-        exp_blur_inplace(tmp=src, W, H, lam*sq_str, lam/sq_str);
+        double lh[3]={lam*sq_str,lam*sq_str,lam*sq_str};
+        double lv[3]={lam/sq_str,lam/sq_str,lam/sq_str};
+        exp_blur_from(src, tmp, W, H, lh, lv);
         float coeff = (float)(p_s*wc*cw[k]);
         for (size_t i=0; i<np; ++i) {
             psf_acc[i*4+0]+=coeff*tmp[i*4+0];
@@ -287,7 +296,9 @@ static double accumulate_stage(
     // halo — per-channel weights for the warmth tint
     for (int k=0; k<hg.n; ++k) {
         double lam = hl[k]*size/pixelUm;
-        exp_blur_inplace(tmp=src, W, H, lam*sq_str, lam/sq_str);
+        double lh[3]={lam*sq_str,lam*sq_str,lam*sq_str};
+        double lv[3]={lam/sq_str,lam/sq_str,lam/sq_str};
+        exp_blur_from(src, tmp, W, H, lh, lv);
         float whr=(float)(p_s*wh*halo_ch[0][k]);
         float whg=(float)(p_s*wh*halo_ch[1][k]);
         float whb=(float)(p_s*wh*halo_ch[2][k]);
@@ -299,27 +310,18 @@ static double accumulate_stage(
     }
 
     // bloom — chromatic aberration: R scatters wider, B tighter
-    const double cs[4]={1.0+chroma, 1.0, std::max(0.1,1.0-chroma*0.5), 1.0};
+    const double cs[3]={1.0+chroma, 1.0, std::max(0.1,1.0-chroma*0.5)};
     for (int k=0; k<bg.n; ++k) {
         if (bw[k]<=0) continue;
         double lam_base = bl[k]*size/pixelUm;
         float coeff = (float)(p_s*wb*bw[k]);
-        if (chroma<1e-4) {
-            exp_blur_inplace(tmp=src, W, H, lam_base*sq_str, lam_base/sq_str);
-            for (size_t i=0; i<np; ++i) {
-                psf_acc[i*4+0]+=coeff*tmp[i*4+0];
-                psf_acc[i*4+1]+=coeff*tmp[i*4+1];
-                psf_acc[i*4+2]+=coeff*tmp[i*4+2];
-            }
-        } else {
-            double lh[4],lv[4];
-            for (int c=0;c<4;++c){ lh[c]=lam_base*cs[c]*sq_str; lv[c]=lam_base*cs[c]/sq_str; }
-            exp_blur_general(tmp=src, W, H, lh, lv);
-            for (size_t i=0; i<np; ++i) {
-                psf_acc[i*4+0]+=coeff*tmp[i*4+0];
-                psf_acc[i*4+1]+=coeff*tmp[i*4+1];
-                psf_acc[i*4+2]+=coeff*tmp[i*4+2];
-            }
+        double lh[3], lv[3];
+        for (int c=0;c<3;++c){ lh[c]=lam_base*cs[c]*sq_str; lv[c]=lam_base*cs[c]/sq_str; }
+        exp_blur_from(src, tmp, W, H, lh, lv);
+        for (size_t i=0; i<np; ++i) {
+            psf_acc[i*4+0]+=coeff*tmp[i*4+0];
+            psf_acc[i*4+1]+=coeff*tmp[i*4+1];
+            psf_acc[i*4+2]+=coeff*tmp[i*4+2];
         }
     }
     return p_s;
