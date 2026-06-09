@@ -34,7 +34,7 @@ static OfxParameterSuiteV1   *gParamSuite  = nullptr;
 static OfxMemorySuiteV1      *gMemorySuite = nullptr;
 
 static const char *kPluginId = "com.nimbusdiffusor.NimbusDiffusion";
-static const int kMajorVer = 2, kMinorVer = 2;
+static const int kMajorVer = 2, kMinorVer = 3;
 
 // param IDs
 #define kParamMix           "Mix"
@@ -49,6 +49,7 @@ static const int kMajorVer = 2, kMinorVer = 2;
 #define kParamPrintSize     "PrintSize"
 #define kParamPrintWarmth   "PrintWarmth"
 // advanced
+#define kParamShowMatte      "ShowMatte"
 #define kParamPixelSize      "SensorPixelUm"
 #define kParamStretch        "Stretch"
 #define kParamChroma         "ChromaShift"
@@ -390,19 +391,19 @@ static OfxStatus action_describe(OfxImageEffectHandle handle) {
     DEF_D(WM_,"Warmth","Tint the halo. +1 = warm yellowish glow, -1 = cool blue.", \
         0.0, -1.5,1.5, -1.5,1.5, GRP_)
 
-// 6 fine-tuning controls per stage (under Advanced)
-#define DEF_STAGE_ADV(CI_,CS_,HI_,HS_,BI_,BS_, CI_D,CS_D,HI_D,HS_D,BI_D,BS_D, GRP_) \
-    DEF_D(CI_,"Core Intensity","Core brightness multiplier.",                          \
-        CI_D, 0.0,4.0, 0.0,4.0, GRP_)                                                 \
-    DEF_D(CS_,"Core Size","Core radius multiplier.",                                   \
-        CS_D, 0.1,4.0, 0.1,4.0, GRP_)                                                 \
-    DEF_D(HI_,"Halo Intensity","Halo brightness multiplier.",                          \
-        HI_D, 0.0,4.0, 0.0,4.0, GRP_)                                                 \
-    DEF_D(HS_,"Halo Size","Halo radius multiplier.",                                   \
-        HS_D, 0.1,4.0, 0.1,4.0, GRP_)                                                 \
-    DEF_D(BI_,"Bloom Intensity","Bloom brightness multiplier.",                        \
-        BI_D, 0.0,4.0, 0.0,4.0, GRP_)                                                 \
-    DEF_D(BS_,"Bloom Size","Bloom radius multiplier.",                                 \
+// 6 fine-tuning controls per stage — PFX_ is "Lens" or "Print"
+#define DEF_STAGE_ADV(CI_,CS_,HI_,HS_,BI_,BS_, CI_D,CS_D,HI_D,HS_D,BI_D,BS_D, PFX_, GRP_) \
+    DEF_D(CI_, PFX_ " Core Intensity","Core brightness multiplier.",                         \
+        CI_D, 0.0,4.0, 0.0,4.0, GRP_)                                                       \
+    DEF_D(CS_, PFX_ " Core Size","Core radius multiplier.",                                  \
+        CS_D, 0.1,4.0, 0.1,4.0, GRP_)                                                       \
+    DEF_D(HI_, PFX_ " Halo Intensity","Halo brightness multiplier.",                         \
+        HI_D, 0.0,4.0, 0.0,4.0, GRP_)                                                       \
+    DEF_D(HS_, PFX_ " Halo Size","Halo radius multiplier.",                                  \
+        HS_D, 0.1,4.0, 0.1,4.0, GRP_)                                                       \
+    DEF_D(BI_, PFX_ " Bloom Intensity","Bloom brightness multiplier.",                       \
+        BI_D, 0.0,4.0, 0.0,4.0, GRP_)                                                       \
+    DEF_D(BS_, PFX_ " Bloom Size","Bloom radius multiplier.",                                \
         BS_D, 0.1,4.0, 0.1,4.0, GRP_)
 
 static OfxStatus action_describe_in_context(OfxImageEffectHandle handle,
@@ -472,18 +473,32 @@ static OfxStatus action_describe_in_context(OfxImageEffectHandle handle,
         kParamLensHalo,  kParamLensHaloSize,
         kParamLensBloom, kParamLensBloomSize,
         1.0, 1.0, 1.426, 1.0, 1.0, 1.0,
-        "AdvGroup")
+        "Lens", "AdvGroup")
 
     DEF_STAGE_ADV(
         kParamPrintCore,  kParamPrintCoreSize,
         kParamPrintHalo,  kParamPrintHaloSize,
         kParamPrintBloom, kParamPrintBloomSize,
         1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-        "AdvGroup")
+        "Print", "AdvGroup")
 
     gParamSuite->paramDefine(paramSet,kOfxParamTypeGroup,"AdvGroupEnd",&pProps);
     gPropSuite->propSetString(pProps,kOfxPropLabel,       0,"");
     gPropSuite->propSetInt   (pProps,kOfxParamPropSecret, 0,1);
+
+    // show matte — outputs the glow contribution as a grayscale map
+    DEF_B(kParamShowMatte,"Show Effect Matte",
+        "Replaces the output with a grayscale map showing where diffusion light is being added. "
+        "Bright = more glow. Turn this on to check what's being affected.",
+        false, "")
+
+    // about
+    gParamSuite->paramDefine(paramSet,kOfxParamTypeString,"AboutText",&pProps);
+    gPropSuite->propSetString(pProps,kOfxPropLabel,           0,"");
+    gPropSuite->propSetString(pProps,kOfxParamPropDefault,    0,
+        "Nimbus Diffusion v2.3  |  Copyright 2026 Mohamed Mabrok  |  GPL v3 — free & open source");
+    gPropSuite->propSetString(pProps,kOfxParamPropStringMode, 0,kOfxParamStringIsLabel);
+    gPropSuite->propSetInt   (pProps,kOfxParamPropEnabled,    0,0);
 
     return kOfxStatOK;
 }
@@ -503,6 +518,7 @@ static OfxStatus action_is_identity(OfxImageEffectHandle handle,
         int v=def; gParamSuite->paramGetValueAtTime(ph,time,&v); return v;
     };
 
+    if (gi(kParamShowMatte,0)) return kOfxStatReplyDefault; // always render when matte is on
     if (gd(kParamMix,1.0) <= 0) {
         gPropSuite->propSetString(outArgs,kOfxPropName,0,kOfxImageEffectSimpleSourceClipName);
         gPropSuite->propSetDouble(outArgs,kOfxPropTime,0,time);
@@ -576,8 +592,9 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
         int v=def; gParamSuite->paramGetValueAtTime(ph,time,&v); return v;
     };
 
-    double mix    = std::max(0.0,std::min(1.0, gd(kParamMix,      1.0)));
-    double pixelUm= std::max(1e-6,              gd(kParamPixelSize,12.4));
+    double mix      = std::max(0.0,std::min(1.0, gd(kParamMix,      1.0)));
+    bool   showMatte= (bool)gi(kParamShowMatte, 0);
+    double pixelUm  = std::max(1e-6,            gd(kParamPixelSize,12.4));
     double stretch= std::max(0.01,              gd(kParamStretch,  1.0));
     double chroma = std::max(0.0,               gd(kParamChroma,   0.0));
     double sq_str = std::sqrt(stretch);
@@ -638,7 +655,7 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
     int dstW=db[2]-db[0], dstH=db[3]-db[1];
 
     // pass source through if there's nothing to do — avoids a white frame at Strength=0
-    bool hasEffect = (mix>0) && (lensPS>0 || prnPS>0);
+    bool hasEffect = ((mix>0) && (lensPS>0 || prnPS>0)) || showMatte;
     if (!hasEffect || srcW<=0||srcH<=0||dstW<=0||dstH<=0) {
         if (srcW>0&&srcH>0&&dstW>0&&dstH>0) {
             Buf pt=read_image(sd,srcW,srcH,srb,snc);
@@ -690,6 +707,23 @@ static OfxStatus action_render(OfxImageEffectHandle handle,
             result[di+1]=src[si+1]+fmix*(psf_acc[si+1]-fps*src[si+1]);
             result[di+2]=src[si+2]+fmix*(psf_acc[si+2]-fps*src[si+2]);
             result[di+3]=src[si+3];
+        }
+    }
+
+    // matte mode — replace output with grayscale showing where glow was added
+    if (showMatte) {
+        for (int y=0;y<dstH;++y){
+            int sy=y+oy; if(sy<0||sy>=srcH) continue;
+            for (int x=0;x<dstW;++x){
+                int sx=x+ox; if(sx<0||sx>=srcW) continue;
+                size_t si=(size_t)(sy*srcW+sx)*4;
+                size_t di=(size_t)(y *dstW+x )*4;
+                float v=std::max(0.0f,
+                    ((result[di+0]-src[si+0])+
+                     (result[di+1]-src[si+1])+
+                     (result[di+2]-src[si+2]))/3.0f*5.0f);
+                result[di+0]=result[di+1]=result[di+2]=v;
+            }
         }
     }
 
