@@ -34,7 +34,7 @@ static OfxParameterSuiteV1   *gParamSuite  = nullptr;
 static OfxMemorySuiteV1      *gMemorySuite = nullptr;
 
 static const char *kPluginId = "com.nimbusdiffusor.NimbusDiffusion";
-static const int kMajorVer = 2, kMinorVer = 4;
+static const int kMajorVer = 2, kMinorVer = 5;
 
 // param IDs
 #define kParamMix           "Mix"
@@ -82,21 +82,42 @@ struct FamilyCfg {
     double w_c, w_h, w_b, warmth_base, gain;
 };
 
-static const FamilyCfg kFamilies[4] = {
-    { "glimmerglass",   "Glimmerglass",
-      {  10.0,1.5,1,0.0},{  50.0,2.0,2,0.0},{ 260.0,2.5,2,3.2},
-      0.60,0.30,0.10,0.00,0.65 },
-    { "black_pro_mist", "Black Pro-Mist",
-      {  16.0,1.5,1,0.0},{  95.0,2.0,2,0.0},{ 380.0,2.5,2,3.5},
-      0.40,0.47,0.13,0.65,0.75 },
-    { "pro_mist",       "Pro-Mist",
-      {  14.0,1.5,1,0.0},{ 150.0,2.0,2,0.0},{ 650.0,2.5,2,2.9},
-      0.28,0.42,0.30,0.40,1.05 },
-    { "cinebloom",      "CineBloom",
-      {  20.0,1.5,1,0.0},{ 200.0,2.0,2,0.0},{1000.0,2.5,2,2.5},
-      0.22,0.30,0.48,0.85,1.00 },
+static const FamilyCfg kFamilies[8] = {
+    { "glimmerglass",        "Glimmerglass",
+      {  10.0,1.5,1,0.0},{  50.0,2.0,2,0.0},{  260.0,2.5,2,3.2},
+      0.60,0.30,0.10, 0.00,0.65 },
+    { "black_pro_mist",      "Black Pro-Mist",
+      {  16.0,1.5,1,0.0},{  95.0,2.0,2,0.0},{  380.0,2.5,2,3.5},
+      0.40,0.47,0.13, 0.65,0.75 },
+    { "pro_mist",            "Pro-Mist",
+      {  14.0,1.5,1,0.0},{ 150.0,2.0,2,0.0},{  650.0,2.5,2,2.9},
+      0.28,0.42,0.30, 0.40,1.05 },
+    { "cinebloom",           "CineBloom",
+      {  20.0,1.5,1,0.0},{ 200.0,2.0,2,0.0},{ 1000.0,2.5,2,2.5},
+      0.22,0.30,0.48, 0.85,1.00 },
+    // --- new filters ---
+    // Hollywood Black Magic: tight precise highlight glow, almost no bloom.
+    // Very core-heavy — adds a clean halo to lights without softening the frame.
+    { "hollywood_black_magic","Hollywood Black Magic",
+      {   8.0,1.5,1,0.0},{  45.0,2.0,2,0.0},{  180.0,2.5,2,2.8},
+      0.70,0.25,0.05, 0.15,0.50 },
+    // Supermist: heavy all-over diffusion, strong bloom.
+    // More aggressive than Pro-Mist — dreamy, full-frame softness.
+    { "supermist",           "Supermist",
+      {  18.0,1.5,1,0.0},{ 110.0,2.0,2,0.0},{  750.0,2.5,2,2.7},
+      0.20,0.35,0.45, 0.55,1.20 },
+    // White Pro-Mist: same spread as Pro-Mist, but cooler and cleaner.
+    // The "white" element means neutral-to-cool colour rather than warm.
+    { "white_pro_mist",      "White Pro-Mist",
+      {  13.0,1.5,1,0.0},{ 130.0,2.0,2,0.0},{  580.0,2.5,2,2.9},
+      0.32,0.44,0.24,-0.10,0.95 },
+    // Black Diffusion/FX: widest, softest spread — more than CineBloom.
+    // Very wide bloom dominates; warmth bias adds contrast character.
+    { "black_diffusion_fx",  "Black Diffusion/FX",
+      {  25.0,1.5,1,0.0},{ 280.0,2.0,2,0.0},{ 1400.0,2.5,2,2.4},
+      0.15,0.25,0.60, 0.70,1.10 },
 };
-static const int kNumFamilies = 4;
+static const int kNumFamilies = 8;
 
 static const double kStrengthBreaks[5]    = {0.125,0.25,0.5,1.0,2.0};
 static const double kStrengthFractions[5] = {0.10, 0.20,0.35,0.55,0.75};
@@ -383,11 +404,15 @@ static OfxStatus action_describe(OfxImageEffectHandle handle) {
     gPropSuite->propSetString(pProps,kOfxPropLabel,            0,"Filter Type");  \
     gPropSuite->propSetString(pProps,kOfxParamPropHint,        0,"Which filter to emulate."); \
     gPropSuite->propSetInt   (pProps,kOfxParamPropDefault,     0,1);              \
-    gPropSuite->propSetString(pProps,kOfxParamPropChoiceOption,0,"Glimmerglass"); \
-    gPropSuite->propSetString(pProps,kOfxParamPropChoiceOption,1,"Black Pro-Mist"); \
-    gPropSuite->propSetString(pProps,kOfxParamPropChoiceOption,2,"Pro-Mist");     \
-    gPropSuite->propSetString(pProps,kOfxParamPropChoiceOption,3,"CineBloom");    \
-    gPropSuite->propSetString(pProps,kOfxParamPropParent,      0,GRP_);           \
+    gPropSuite->propSetString(pProps,kOfxParamPropChoiceOption,0,"Glimmerglass");          \
+    gPropSuite->propSetString(pProps,kOfxParamPropChoiceOption,1,"Black Pro-Mist");       \
+    gPropSuite->propSetString(pProps,kOfxParamPropChoiceOption,2,"Pro-Mist");             \
+    gPropSuite->propSetString(pProps,kOfxParamPropChoiceOption,3,"CineBloom");            \
+    gPropSuite->propSetString(pProps,kOfxParamPropChoiceOption,4,"Hollywood Black Magic");\
+    gPropSuite->propSetString(pProps,kOfxParamPropChoiceOption,5,"Supermist");            \
+    gPropSuite->propSetString(pProps,kOfxParamPropChoiceOption,6,"White Pro-Mist");       \
+    gPropSuite->propSetString(pProps,kOfxParamPropChoiceOption,7,"Black Diffusion/FX");   \
+    gPropSuite->propSetString(pProps,kOfxParamPropParent,      0,GRP_);                   \
     DEF_D(STR_,"Strength",                                                        \
         "How strong the filter is. Matches commercial stop ratings: 0.125=1/8, 0.25=1/4, 0.5=1/2, 1.0=full, 2.0=heavy.", \
         STR_DEF_, 0.0,2.0, 0.0,2.0, GRP_)                                        \
@@ -526,7 +551,7 @@ static OfxStatus action_describe_in_context(OfxImageEffectHandle handle,
     gParamSuite->paramDefine(paramSet,kOfxParamTypeString,"AboutText",&pProps);
     gPropSuite->propSetString(pProps,kOfxPropLabel,           0,"");
     gPropSuite->propSetString(pProps,kOfxParamPropDefault,    0,
-        "Nimbus Diffusion v2.4  |  Copyright 2026 Mohamed Mabrok  |  GPL v3 — free & open source");
+        "Nimbus Diffusion v2.5  |  Copyright 2026 Mohamed Mabrok  |  GPL v3 — free & open source");
     gPropSuite->propSetString(pProps,kOfxParamPropStringMode, 0,kOfxParamStringIsLabel);
     gPropSuite->propSetInt   (pProps,kOfxParamPropEnabled,    0,0);
 
