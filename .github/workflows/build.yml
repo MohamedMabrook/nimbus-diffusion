@@ -18,29 +18,17 @@ jobs:
       - name: Cache OpenFX headers
         uses: actions/cache@v4
         with:
-          path: ofx/_deps
+          path: ofx/build/_deps
           key: openfx-${{ hashFiles('ofx/CMakeLists.txt') }}
-
-      - name: Cache Inno Setup
-        id: cache-inno
-        uses: actions/cache@v4
-        with:
-          path: C:\Program Files (x86)\Inno Setup 6
-          key: innosetup-6
-
-      - name: Install Inno Setup
-        if: steps.cache-inno.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri "https://files.jrsoftware.org/is/6/innosetup-6.4.3.exe" -OutFile innosetup.exe
-          .\innosetup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
-          Remove-Item innosetup.exe
 
       - name: Configure
         run: cmake -S ofx -B ofx/build -A x64
 
       - name: Build
         run: cmake --build ofx/build --config Release --parallel
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
 
       - name: Compile installer
         shell: pwsh
