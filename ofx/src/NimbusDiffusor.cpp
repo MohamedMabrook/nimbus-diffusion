@@ -6,15 +6,14 @@
 // anamorphic stretch, chromatic bloom.
 //
 // PSF math based on spektrafilm by Andrea Volpato (GPLv3).
-// C++ rewrite: exact 2D isotropic exponential PSF via FFT convolution,
-// matching spektrafilm kernel-for-kernel. Two-stage lens/print pipeline.
+// C++ port: Gaussian-mixture surrogate of the 2D isotropic exponential PSF
+// via Young-van Vliet IIR — matches spektrafilm's fast_exponential_filter exactly.
 
 #include <cmath>
 #include <vector>
 #include <algorithm>
 #include <cstring>
 #include <string>
-#include <complex>
 #ifndef M_PI
 #  define M_PI 3.14159265358979323846
 #endif
@@ -245,43 +244,84 @@ static void gauss_blur_from(const Buf &src, Buf &dst, int w, int h,
     }
 }
 
-// ─── Radix-2 Cooley-Tukey FFT engine ────────────────────────────────────────
-using cx = std::complex<float>;
-static int next_pow2(int n){int p=1;while(p<n)p<<=1;return p;}
+// ─── Young-van Vliet 3rd-order IIR Gaussian (spektrafilm's fast_gaussian_filter) ─
+//
+// 3-term Gaussian mixture that approximates exp(-r/λ)/(2πλ²):
+//   exp(-r/λ) ≈ 0.1633·G(0.5360λ) + 0.6496·G(1.5236λ) + 0.1870·G(2.7684λ)
+// Coefficients taken verbatim from spektrafilm's fast_exponential_filter.
+static const double kExpFitA[3] = {0.1633, 0.6496, 0.1870};
+static const double kExpFitS[3] = {0.5360, 1.5236, 2.7684};
 
-static void fft1d(cx *a, int n, bool inv){
-    for(int i=1,j=0;i<n;++i){
-        int bit=n>>1;for(;j&bit;bit>>=1)j^=bit;j^=bit;
-        if(i<j)std::swap(a[i],a[j]);
-    }
-    for(int len=2;len<=n;len<<=1){
-        float ang=(inv?1.f:-1.f)*(float)(2.0*M_PI/len);
-        cx wlen(std::cos(ang),std::sin(ang));
-        for(int i=0;i<n;i+=len){
-            cx w(1,0);
-            for(int j=0;j<len/2;++j){
-                cx u=a[i+j],v=a[i+j+len/2]*w;
-                a[i+j]=u+v; a[i+j+len/2]=u-v; w*=wlen;
-            }
-        }
-    }
-    if(inv){float s=1.f/n;for(int i=0;i<n;++i)a[i]*=s;}
+// Compute YvV 3rd-order IIR coefficients for Gaussian with given sigma.
+static void yvv_coeffs(double sigma, double &B, double &b1, double &b2, double &b3){
+    double q = (sigma >= 2.5) ? 0.98711*sigma - 0.96330
+                              : 3.97156 - 4.14554*std::sqrt(std::max(0.0, 1.0-0.26891*sigma));
+    double q2=q*q, q3=q2*q;
+    double b0  = 1.57825 + 2.44413*q + 1.4281*q2 + 0.422205*q3;
+    double bc1 = 2.44413*q + 2.85619*q2 + 1.26661*q3;
+    double bc2 = -(1.4281*q2 + 1.26661*q3);
+    double bc3 = 0.422205*q3;
+    B  = 1.0-(bc1+bc2+bc3)/b0; b1=bc1/b0; b2=bc2/b0; b3=bc3/b0;
 }
 
-static void fft2d_rows(cx *d,int rows,int cols,bool inv){
-    #pragma omp parallel for schedule(static)
-    for(int r=0;r<rows;++r) fft1d(d+r*cols,cols,inv);
-}
-static void fft2d_cols(cx *d,int rows,int cols,bool inv){
+// Forward+backward YvV IIR Gaussian along rows (H), in-place on channel ch.
+static void yvv_h(Buf &buf, int W, int H, int ch,
+                  double B, double b1, double b2, double b3){
     #pragma omp parallel
     {
-        std::vector<cx> col(rows);
+        std::vector<double> t(W);
         #pragma omp for schedule(static)
-        for(int c=0;c<cols;++c){
-            for(int r=0;r<rows;++r) col[r]=d[r*cols+c];
-            fft1d(col.data(),rows,inv);
-            for(int r=0;r<rows;++r) d[r*cols+c]=col[r];
+        for(int y=0;y<H;++y){
+            float *row=buf.data()+y*W*4;
+            double w1=row[ch],w2=row[ch],w3=row[ch];
+            for(int x=0;x<W;++x){
+                double w=B*row[x*4+ch]+b1*w1+b2*w2+b3*w3;
+                t[x]=w; w3=w2; w2=w1; w1=w;
+            }
+            double y1=t[W-1],y2=t[W-1],y3=t[W-1];
+            for(int x=W-1;x>=0;--x){
+                double yv=B*t[x]+b1*y1+b2*y2+b3*y3;
+                t[x]=yv; y3=y2; y2=y1; y1=yv;
+            }
+            for(int x=0;x<W;++x) row[x*4+ch]=(float)t[x];
         }
+    }
+}
+
+// Forward+backward YvV IIR Gaussian along columns (V), in-place on channel ch.
+static void yvv_v(Buf &buf, int W, int H, int ch,
+                  double B, double b1, double b2, double b3){
+    #pragma omp parallel
+    {
+        std::vector<double> col(H), out(H);
+        #pragma omp for schedule(static)
+        for(int x=0;x<W;++x){
+            for(int y=0;y<H;++y) col[y]=buf[(y*W+x)*4+ch];
+            double w1=col[0],w2=col[0],w3=col[0];
+            for(int y=0;y<H;++y){
+                double w=B*col[y]+b1*w1+b2*w2+b3*w3;
+                out[y]=w; w3=w2; w2=w1; w1=w;
+            }
+            double y1=out[H-1],y2=out[H-1],y3=out[H-1];
+            for(int y=H-1;y>=0;--y){
+                double yv=B*out[y]+b1*y1+b2*y2+b3*y3;
+                out[y]=yv; y3=y2; y2=y1; y1=yv;
+            }
+            for(int y=0;y<H;++y) buf[(y*W+x)*4+ch]=(float)out[y];
+        }
+    }
+}
+
+// YvV IIR Gaussian blur on channel ch with (optionally anisotropic) sigma_h / sigma_v.
+static void yvv_blur_ch(Buf &buf, int W, int H, int ch,
+                         double sigma_h, double sigma_v){
+    if(sigma_h>=0.5){
+        double B,b1,b2,b3; yvv_coeffs(sigma_h,B,b1,b2,b3);
+        yvv_h(buf,W,H,ch,B,b1,b2,b3);
+    }
+    if(sigma_v>=0.5){
+        double B,b1,b2,b3; yvv_coeffs(sigma_v,B,b1,b2,b3);
+        yvv_v(buf,W,H,ch,B,b1,b2,b3);
     }
 }
 // ─────────────────────────────────────────────────────────────────────────────
@@ -315,10 +355,10 @@ static void write_image(const Buf &buf, void *data, int w, int h,
     }
 }
 
-// Accumulate one diffusion stage into psf_acc using FFT convolution.
-// Builds the exact 2D anisotropic exponential PSF (same formula as spektrafilm):
-//   K_c(x,y) = Σ_k w_k * exp(-sqrt((x/λ_h_k)²+(y/λ_v_k)²)) / (2π·λ_h_k·λ_v_k)
-// Per-channel for the warmth-tinted halo and chromatic bloom.
+// Accumulate one diffusion stage into psf_acc using the Gaussian-mixture surrogate
+// of the 2D isotropic exponential PSF — identical to spektrafilm's fast_exponential_filter:
+//   exp(-r/λ) ≈ Σ_g kExpFitA[g] · YvV_Gaussian(kExpFitS[g]·λ)
+// Applied separably (H then V) via Young-van Vliet 3rd-order IIR — O(1) per pixel.
 // Result: psf_acc += p_s * (K * src)
 static double accumulate_stage(
     const Buf &src, int W, int H,
@@ -328,7 +368,7 @@ static double accumulate_stage(
     double haloI, double haloSz,
     double bloomI, double bloomSz,
     double chroma,
-    Buf &psf_acc, Buf &/*unused*/)
+    Buf &psf_acc, Buf &tmp)
 {
     if(p_s<=0.0) return 0.0;
     const FamilyCfg &fam=kFamilies[fi];
@@ -337,99 +377,68 @@ static double accumulate_stage(
     wc/=wt; wh/=wt; wb/=wt;
 
     double eff_w=fam.warmth_base+warmth;
-    GroupCfg cg={fam.core.lambda_um*coreSz, fam.core.spread,  fam.core.n,  fam.core.alpha};
-    GroupCfg hg={fam.halo.lambda_um*haloSz, fam.halo.spread,  fam.halo.n,  fam.halo.alpha};
-    GroupCfg bg={fam.bloom.lambda_um*bloomSz,fam.bloom.spread,fam.bloom.n, fam.bloom.alpha};
+    GroupCfg cg={fam.core.lambda_um*coreSz, fam.core.spread, fam.core.n, fam.core.alpha};
+    GroupCfg hg={fam.halo.lambda_um*haloSz, fam.halo.spread, fam.halo.n, fam.halo.alpha};
+    GroupCfg bg={fam.bloom.lambda_um*bloomSz,fam.bloom.spread,fam.bloom.n,fam.bloom.alpha};
     double cl[MAX_SUB],cw_[MAX_SUB],hl[MAX_SUB],hw[MAX_SUB],bl[MAX_SUB],bw_[MAX_SUB];
     expand_group(cg,false,cl,cw_); expand_group(hg,false,hl,hw); expand_group(bg,true,bl,bw_);
     double hch[3][MAX_SUB]; halo_channel_weights(hw,hg.n,eff_w,hch);
-    const double cs[3]={1.0+chroma,1.0,std::max(0.1,1.0-chroma*0.5)};
+    const double cs[3]={1.0+chroma, 1.0, std::max(0.1, 1.0-chroma*0.5)};
 
-    // Radius: 8× the largest per-channel bloom lambda, capped at half smallest dimension.
-    // Matches spektrafilm's truncation: 8·λ_max captures 99.95% of the exponential's 2D energy.
-    double bloom_max=bl[bg.n-1]*size/pixelUm*std::max(cs[0]*sq_str, cs[0]/sq_str);
-    int R=std::min((int)std::ceil(8.0*bloom_max), std::max(1,std::min(W,H)/2-1));
+    float ps_f=(float)p_s;
+    size_t np=(size_t)W*H;
+    tmp.resize(np*4);
 
-    // Cap FFT dimensions to 4096 to bound peak memory (~256 MB for two cx buffers)
-    while((next_pow2(W+4*R)>4096||next_pow2(H+4*R)>4096)&&R>1) R=std::max(1,R*3/4);
-
-    int fW=next_pow2(W+4*R), fH=next_pow2(H+4*R);
-    int kSz=2*R+1;
-    size_t fN=(size_t)fW*fH;
-
-    // Build per-channel PSF kernel (kSz × kSz) as sum of 2D exponential sub-components.
-    // Layout: Kc[ch * kSz*kSz + ky*kSz + kx]
-    std::vector<float> Kc((size_t)3*kSz*kSz, 0.0f);
-    #pragma omp parallel for schedule(static)
-    for(int ky=0;ky<kSz;++ky) for(int kx=0;kx<kSz;++kx){
-        double dx=kx-R, dy=ky-R;
-        float tmp3[3]={0,0,0};
-        // core — achromatic (same λ all channels, possibly elliptical from stretch)
-        for(int k=0;k<cg.n;++k){
-            if(cw_[k]<=0) continue;
-            double lh=cl[k]*sq_str*size/pixelUm, lv=cl[k]/sq_str*size/pixelUm;
-            double r=std::sqrt((dx/lh)*(dx/lh)+(dy/lv)*(dy/lv));
-            double e=cw_[k]*std::exp(-r)/(2.0*M_PI*lh*lv);
-            float fe=(float)(wc*e);
-            tmp3[0]+=fe; tmp3[1]+=fe; tmp3[2]+=fe;
-        }
-        // halo — per-channel warmth weights, same spatial scale per sub-component
-        for(int k=0;k<hg.n;++k){
-            double lh=hl[k]*sq_str*size/pixelUm, lv=hl[k]/sq_str*size/pixelUm;
-            double r=std::sqrt((dx/lh)*(dx/lh)+(dy/lv)*(dy/lv));
-            double e=std::exp(-r)/(2.0*M_PI*lh*lv);
-            for(int c=0;c<3;++c) tmp3[c]+=(float)(wh*hch[c][k]*e);
-        }
-        // bloom — per-channel chromatic shift
-        for(int k=0;k<bg.n;++k){
-            if(bw_[k]<=0) continue;
-            for(int c=0;c<3;++c){
-                double lh=bl[k]*cs[c]*sq_str*size/pixelUm;
-                double lv=bl[k]*cs[c]/sq_str*size/pixelUm;
-                double r=std::sqrt((dx/lh)*(dx/lh)+(dy/lv)*(dy/lv));
-                tmp3[c]+=(float)(wb*bw_[k]*std::exp(-r)/(2.0*M_PI*lh*lv));
+    // ── Core: achromatic — same lambda for all channels ──────────────────────
+    for(int k=0;k<cg.n;++k){
+        if(cw_[k]<=0.0) continue;
+        double lam=cl[k]*size/pixelUm;
+        for(int g=0;g<3;++g){
+            double sh=kExpFitS[g]*lam*sq_str, sv=kExpFitS[g]*lam/sq_str;
+            std::copy(src.begin(),src.end(),tmp.begin());
+            for(int ch=0;ch<3;++ch) yvv_blur_ch(tmp,W,H,ch,sh,sv);
+            float coeff=ps_f*(float)(wc*cw_[k]*kExpFitA[g]);
+            for(size_t i=0;i<np;++i){
+                psf_acc[i*4+0]+=coeff*tmp[i*4+0];
+                psf_acc[i*4+1]+=coeff*tmp[i*4+1];
+                psf_acc[i*4+2]+=coeff*tmp[i*4+2];
             }
         }
-        for(int c=0;c<3;++c) Kc[(size_t)c*kSz*kSz+ky*kSz+kx]=tmp3[c];
-    }
-    // Normalize each channel's kernel to sum = 1
-    for(int c=0;c<3;++c){
-        double s=0; for(int i=0;i<kSz*kSz;++i) s+=Kc[(size_t)c*kSz*kSz+i];
-        if(s>0){float inv=(float)(1.0/s); for(int i=0;i<kSz*kSz;++i) Kc[(size_t)c*kSz*kSz+i]*=inv;}
     }
 
-    // FFT-convolve per channel, accumulate p_s * blurred into psf_acc
-    std::vector<cx> A(fN), B(fN);
-    float ps_f=(float)p_s;
-
-    for(int ch=0;ch<3;++ch){
-        // A: reflect-pad source channel by R on all sides, zero-pad to fH×fW
-        std::fill(A.begin(),A.end(),cx(0,0));
-        for(int py=0;py<H+2*R;++py) for(int px=0;px<W+2*R;++px){
-            int sy=py-R, sx=px-R;
-            if(sy<0) sy=-sy-1; if(sy>=H) sy=2*H-1-sy; sy=std::max(0,std::min(H-1,sy));
-            if(sx<0) sx=-sx-1; if(sx>=W) sx=2*W-1-sx; sx=std::max(0,std::min(W-1,sx));
-            A[(size_t)py*fW+px]=cx(src[(size_t)(sy*W+sx)*4+ch],0);
+    // ── Halo: per-channel warmth weights, same spatial scale ─────────────────
+    for(int k=0;k<hg.n;++k){
+        double lam=hl[k]*size/pixelUm;
+        for(int g=0;g<3;++g){
+            double sh=kExpFitS[g]*lam*sq_str, sv=kExpFitS[g]*lam/sq_str;
+            std::copy(src.begin(),src.end(),tmp.begin());
+            for(int ch=0;ch<3;++ch) yvv_blur_ch(tmp,W,H,ch,sh,sv);
+            for(int ch=0;ch<3;++ch){
+                float coeff=ps_f*(float)(wh*hch[ch][k]*kExpFitA[g]);
+                for(size_t i=0;i<np;++i) psf_acc[i*4+ch]+=coeff*tmp[i*4+ch];
+            }
         }
-        // B: kernel zero-padded at top-left of fH×fW array (scipy fftconvolve layout)
-        std::fill(B.begin(),B.end(),cx(0,0));
-        for(int ky=0;ky<kSz;++ky) for(int kx=0;kx<kSz;++kx)
-            B[(size_t)ky*fW+kx]=cx(Kc[(size_t)ch*kSz*kSz+ky*kSz+kx],0);
-
-        // 2D FFT
-        fft2d_rows(A.data(),fH,fW,false); fft2d_cols(A.data(),fH,fW,false);
-        fft2d_rows(B.data(),fH,fW,false); fft2d_cols(B.data(),fH,fW,false);
-        // Pointwise multiply
-        ptrdiff_t fN_s=(ptrdiff_t)fN;
-        #pragma omp parallel for schedule(static)
-        for(ptrdiff_t i=0;i<fN_s;++i) A[i]*=B[i];
-        // 2D IFFT
-        fft2d_rows(A.data(),fH,fW,true); fft2d_cols(A.data(),fH,fW,true);
-
-        // Extract: offset 2R from top-left (R from reflect-pad + R from kernel half-width)
-        for(int y=0;y<H;++y) for(int x=0;x<W;++x)
-            psf_acc[(size_t)(y*W+x)*4+ch]+=ps_f*A[(size_t)(y+2*R)*fW+(x+2*R)].real();
     }
+
+    // ── Bloom: per-channel chromatic scale — different lambda per channel ─────
+    for(int k=0;k<bg.n;++k){
+        if(bw_[k]<=0.0) continue;
+        double lam=bl[k]*size/pixelUm;
+        for(int g=0;g<3;++g){
+            std::copy(src.begin(),src.end(),tmp.begin());
+            for(int ch=0;ch<3;++ch){
+                double sh=kExpFitS[g]*lam*cs[ch]*sq_str, sv=kExpFitS[g]*lam*cs[ch]/sq_str;
+                yvv_blur_ch(tmp,W,H,ch,sh,sv);
+            }
+            float coeff=ps_f*(float)(wb*bw_[k]*kExpFitA[g]);
+            for(size_t i=0;i<np;++i){
+                psf_acc[i*4+0]+=coeff*tmp[i*4+0];
+                psf_acc[i*4+1]+=coeff*tmp[i*4+1];
+                psf_acc[i*4+2]+=coeff*tmp[i*4+2];
+            }
+        }
+    }
+
     return p_s;
 }
 
