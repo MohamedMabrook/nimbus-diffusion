@@ -37,7 +37,7 @@ static OfxParameterSuiteV1   *gParamSuite  = nullptr;
 static OfxMemorySuiteV1      *gMemorySuite = nullptr;
 
 static const char *kPluginId = "com.nimbusdiffusor.NimbusDiffusion";
-static const int kMajorVer = 2, kMinorVer = 9;
+static const int kMajorVer = 3, kMinorVer = 0;
 
 // param IDs
 #define kParamMix           "Mix"
@@ -633,7 +633,7 @@ static OfxStatus action_describe_in_context(OfxImageEffectHandle handle,
     gParamSuite->paramDefine(paramSet,kOfxParamTypeString,"AboutText",&pProps);
     gPropSuite->propSetString(pProps,kOfxPropLabel,           0,"Info");
     gPropSuite->propSetString(pProps,kOfxParamPropDefault,    0,
-        "Nimbus Diffusion v2.9  |  Copyright 2026 Mohamed Mabrok  |  GPL v3 — free & open source");
+        "Nimbus Diffusion v3.0  |  Copyright 2026 Mohamed Mabrok  |  GPL v3 — free & open source");
     gPropSuite->propSetString(pProps,kOfxParamPropStringMode, 0,kOfxParamStringIsLabel);
     gPropSuite->propSetInt   (pProps,kOfxParamPropEnabled,    0,0);
 
