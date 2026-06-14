@@ -2,7 +2,7 @@
 ; Copyright (C) 2026 Mohamed Mabrok — GPL v3
 
 #define AppName      "Nimbus Diffusion"
-#define AppVersion   "2.8"
+#define AppVersion   "2.9"
 #define AppAuthor    "Mohamed Mabrok"
 #define AppURL       "https://github.com/mohamedmabrok/nimbus-diffusion"
 #define OFXPluginDir "C:\Program Files\Common Files\OFX\Plugins"
